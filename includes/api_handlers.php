@@ -699,4 +699,3 @@ if (!$linha_alvo) responder_json(["erro" => "Linha não encontrada (ID: $id_linh
 }
 
 ?>
-
