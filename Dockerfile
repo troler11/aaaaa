@@ -1,21 +1,26 @@
-# Usa uma imagem oficial do PHP com Apache (igual hospedagem comum)
+# Usa uma imagem oficial do PHP com Apache
 FROM php:8.2-apache
 
-# Instala extensões necessárias e o cURL
+# Instala dependências do sistema
 RUN apt-get update && apt-get install -y \
     libcurl4-openssl-dev \
-    && docker-php-ext-install curl session
+    git \
+    unzip
 
-# Ativa o mod_rewrite do Apache (bom para rotas)
+# Instala extensões do PHP
+# AQUI ESTÁ A CORREÇÃO: Adicionamos 'pdo' e 'pdo_mysql'
+RUN docker-php-ext-install curl session pdo pdo_mysql
+
+# Ativa o mod_rewrite do Apache (para rotas funcionarem)
 RUN a2enmod rewrite
 
-# Copia todos os seus arquivos para o servidor
+# Copia todos os arquivos do seu projeto para a pasta do servidor
 COPY . /var/www/html/
 
-# Cria a pasta de cookies e dá permissão TOTAL para o Apache escrever nela
+# Configura permissões para a pasta de cookies (CRÍTICO para sua API funcionar)
 RUN mkdir -p /var/www/html/cookies && \
     chown -R www-data:www-data /var/www/html && \
     chmod -R 777 /var/www/html/cookies
 
-# Expõe a porta 80 (padrão web)
+# Expõe a porta 80
 EXPOSE 80
