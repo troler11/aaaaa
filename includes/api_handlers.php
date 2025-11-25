@@ -460,21 +460,33 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
 
 
 
-        $linha_alvo = null;
+       $linha_alvo = null;
+$id_linha_alvo = $_GET['linhaId'] ?? null; // Recebe o ID vindo do JS
 
-        foreach ($todas_linhas as $l) {
-
-            if (($l['veiculo']['veiculo'] ?? '') == $placa) {
-
-                $linha_alvo = $l; break;
-
-            }
-
+// LÓGICA NOVA: Busca Exata pelo ID
+if (!empty($id_linha_alvo)) {
+    foreach ($todas_linhas as $l) {
+        // Verifica se o ID bate (converte para string para garantir)
+        if (strval($l['id'] ?? '') === strval($id_linha_alvo)) {
+            $linha_alvo = $l;
+            break; // Achou exatamente a linha que o usuário está vendo na tela
         }
+    }
+} 
 
+// FALLBACK: Se não achou pelo ID (ou não foi enviado), tenta pela placa (lógica antiga)
+if (!$linha_alvo) {
+    foreach ($todas_linhas as $l) {
+        if (($l['veiculo']['veiculo'] ?? '') == $placa) {
+            $linha_alvo = $l; 
+            // Se quiser manter a lógica de "mais recente" aqui como backup, pode manter
+            // mas o ideal é que o ID sempre funcione.
+            break; 
+        }
+    }
+}
 
-
-        if (!$linha_alvo) responder_json(["erro" => "Linha não encontrada para este veículo."], 404);
+if (!$linha_alvo) responder_json(["erro" => "Linha não encontrada (ID: $id_linha_alvo / Placa: $placa)."], 404);
 
 
 
@@ -687,3 +699,4 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
 }
 
 ?>
+
