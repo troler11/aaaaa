@@ -122,14 +122,16 @@ foreach ($linhas_totais as $l) {
 
 <div class="sidebar d-flex flex-column">
     <div class="text-center py-4 bg-dark bg-opacity-25">
-        <h4 class="fw-bold text-white m-0">ABM Bus</h4>
-        <small class="text-muted">Relatórios</small>
+        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo" style="max-width: 160px;">
     </div>
     <a href="/"><i class="bi bi-speedometer2 me-2"></i>Dashboard</a>
     <a href="#"><i class="bi bi-map me-2"></i>Rotas</a>
     <a href="#"><i class="bi bi-bus-front me-2"></i>Veículos</a>
     <a href="#"><i class="bi bi-person-vcard me-2"></i>Motoristas</a>
     <a href="relatorio.php" class="active"><i class="bi bi-file-earmark-text me-2"></i>Relatórios</a>
+    <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
+        <a href="admin.php"><i class="bi bi-people-fill me-2"></i>Usuários</a>
+    <?php endif; ?>
     <a href="logout.php" class="mt-auto text-danger border-top border-secondary"><i class="bi bi-box-arrow-right me-2"></i>Sair</a>
 </div>
 
