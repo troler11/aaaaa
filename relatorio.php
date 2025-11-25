@@ -276,7 +276,8 @@ foreach ($linhas_totais as $l) {
                                 }
                             }
                         ?>
-                        <tr class="linha-relatorio" data-placa="<?php echo $placa_clean; ?>" data-calcular="<?php echo $deve_calcular; ?>">
+                      <?php $id_linha = $l['id'] ?? ''; // Pega o ID único da linha ?>
+<tr class="linha-relatorio" data-placa="<?php echo $placa_clean; ?>" data-id="<?php echo $id_linha; ?>" data-calcular="<?php echo $deve_calcular; ?>">
                             <td class="fw-bold text-secondary small"><?php echo $empresa; ?></td>
                             <td><span class="badge rounded-pill <?php echo $l['class_sentido']; ?>"><?php echo $l['label_sentido']; ?></span></td>
                             <td><?php echo $rota; ?></td>
@@ -331,9 +332,10 @@ async function carregarPrevisoesLive() {
     const linhas = document.querySelectorAll('.linha-relatorio[data-calcular="true"]');
     
     await processarEmLotes(linhas, 5, async (tr) => {
-        const placa = tr.getAttribute('data-placa');
-        const cellPrev = document.getElementById('prev-termino-' + placa);
-        const cellRest = document.getElementById('tempo-rest-' + placa);
+       const placa = tr.getAttribute('data-placa');
+const idLinha = tr.getAttribute('data-id'); // <--- NOVO: Pega o ID
+const cellPrev = document.getElementById('prev-termino-' + placa);
+const cellRest = document.getElementById('tempo-rest-' + placa);
         
         if (!placa || !cellPrev) return;
 
@@ -341,8 +343,9 @@ async function carregarPrevisoesLive() {
         // cellRest.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
 
         try {
-            const response = await fetch(`/previsao/${placa}`);
-            const data = await response.json();
+    // <--- ALTERADO: Envia o ID como parâmetro na URL
+    const response = await fetch(`/previsao/${placa}?linhaId=${idLinha}`);
+    const data = await response.json();
 
             if (data.duracaoSegundos) {
                 // --- CÁLCULO MATEMÁTICO LIVE ---
@@ -371,3 +374,4 @@ async function carregarPrevisoesLive() {
 
 </body>
 </html>
+
