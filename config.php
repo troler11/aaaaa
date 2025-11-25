@@ -4,10 +4,10 @@ error_reporting(E_ALL & ~E_DEPRECATED);
 date_default_timezone_set('America/Sao_Paulo');
 
 // --- 1. CONFIGURAÇÃO DO BANCO DE DADOS (MySQL) ---
-$DB_HOST = 'localhost';
-$DB_NAME = 'abm_bus_system';
-$DB_USER = 'root';      
-$DB_PASS = '';          
+$DB_HOST = 'buh4fphw039ad5ndh6gs-mysql.services.clever-cloud.com';
+$DB_NAME = 'buh4fphw039ad5ndh6gs';
+$DB_USER = 'u1jijym64xbwsqqg';      
+$DB_PASS = 'WvUiGQXvj7degJoQhtjp';          
 
 try {
     $pdo = new PDO("mysql:host=$DB_HOST;dbname=$DB_NAME;charset=utf8", $DB_USER, $DB_PASS);
@@ -45,4 +45,5 @@ $HEADERS_COMMON = [
     "Accept: application/json, text/javascript, */*; q=0.01",
     "Accept-Language: pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
 ];
+
 ?>
