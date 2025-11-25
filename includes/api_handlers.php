@@ -461,7 +461,7 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
 
 
        $linha_alvo = null;
-$id_linha_alvo = $_GET['linhaId'] ?? null; // Recebe o ID vindo do JS
+$id_linha_alvo = $_GET['idLinha'] ?? null; // Recebe o ID vindo do JS
 
 // LÓGICA NOVA: Busca Exata pelo ID
 if (!empty($id_linha_alvo)) {
@@ -699,3 +699,4 @@ if (!$linha_alvo) responder_json(["erro" => "Linha não encontrada (ID: $id_linh
 }
 
 ?>
+
