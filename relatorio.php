@@ -276,7 +276,7 @@ foreach ($linhas_totais as $l) {
                                 }
                             }
                         ?>
-                      <?php $id_linha = $l['id'] ?? ''; // Pega o ID único da linha ?>
+                      <?php $id_linha = $l['idLinha'] ?? ''; // Pega o ID único da linha ?>
 <tr class="linha-relatorio" data-placa="<?php echo $placa_clean; ?>" data-id="<?php echo $id_linha; ?>" data-calcular="<?php echo $deve_calcular; ?>">
                             <td class="fw-bold text-secondary small"><?php echo $empresa; ?></td>
                             <td><span class="badge rounded-pill <?php echo $l['class_sentido']; ?>"><?php echo $l['label_sentido']; ?></span></td>
@@ -374,4 +374,5 @@ const cellRest = document.getElementById('tempo-rest-' + placa);
 
 </body>
 </html>
+
 
