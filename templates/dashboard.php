@@ -14,12 +14,33 @@ if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true)
     exit;
 }
 
-// --- FILTRO ---
+// --- CONFIGURAÇÃO ---
 $empresas_permitidas = $_SESSION['allowed_companies'] ?? [];
+date_default_timezone_set('America/Sao_Paulo'); 
+$hora_atual = date('H:i');
 
-// Carga inicial
+// Carga inicial dos dados
 $dados_dashboard = handle_index_data($empresas_permitidas);
-extract($dados_dashboard);
+extract($dados_dashboard); // Extrai $todas_linhas, $qtd_total, etc.
+
+// --- LÓGICA DE FILTROS (PHP) ---
+// 1. Extrair lista única de Empresas para o Select
+$lista_empresas_unicas = [];
+
+if (!empty($todas_linhas)) {
+    foreach ($todas_linhas as $l) {
+        // Coleta Empresa
+        $nome_empresa = $l['empresa']['nome'] ?? '';
+        if (!empty($nome_empresa)) {
+            $lista_empresas_unicas[$nome_empresa] = $nome_empresa;
+        }
+    }
+    asort($lista_empresas_unicas); // Ordena alfabeticamente
+}
+
+// 2. Capturar seleção do usuário via GET
+$filtro_empresa = $_GET['empresa'] ?? '';
+$filtro_sentido = $_GET['sentido'] ?? ''; // 'ida' ou 'volta'
 
 // Debug (Opcional)
 $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
@@ -71,6 +92,8 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
         .btn-xs { padding: 0.1rem 0.3rem; font-size: 0.7rem; line-height: 1.0; }
         .blink-animation { animation: blinker 1.5s linear infinite; }
         @keyframes blinker { 50% { opacity: 0.5; } }
+        /* Estilo para a barra de filtros */
+        .filter-bar { background-color: #fff; border-radius: 12px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
     </style>
 </head>
 <body>
@@ -83,7 +106,7 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
     <a href="#"><i class="bi bi-map me-2"></i>Rotas</a>
     <a href="#"><i class="bi bi-bus-front me-2"></i>Veículos</a>
     <a href="#"><i class="bi bi-person-vcard me-2"></i>Motoristas</a>
-    <a href="relatorio.php"><i class="bi bi-bar-chart me-2"></i>Relatórios</a>
+    <a href="relatorio.php"><i class="bi bi-file-earmark-text me-2"></i>Relatórios</a>
     <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
         <a href="admin.php"><i class="bi bi-people-fill me-2"></i>Usuários</a>
     <?php endif; ?>
@@ -104,18 +127,50 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
             <?php endif; ?>
             <div class="position-relative w-50">
                 <i class="bi bi-search search-icon"></i>
-                <input type="text" id="searchInput" class="form-control search-bar" placeholder="Buscar...">
+                <input type="text" id="searchInput" class="form-control search-bar" placeholder="Buscar na tela...">
             </div>
         </div>
     </div>
 
+    <div class="filter-bar">
+        <form method="GET" class="row g-2 align-items-center">
+            
+            <div class="col-md-5">
+                <label class="form-label small fw-bold text-secondary mb-1">Empresa:</label>
+                <select name="empresa" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="">Todas as Empresas</option>
+                    <?php foreach ($lista_empresas_unicas as $emp_nome): ?>
+                        <option value="<?php echo htmlspecialchars($emp_nome); ?>" <?php echo ($filtro_empresa === $emp_nome) ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($emp_nome); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="col-md-5">
+                <label class="form-label small fw-bold text-secondary mb-1">Sentido:</label>
+                <select name="sentido" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="">Todos os Sentidos</option>
+                    <option value="ida" <?php echo ($filtro_sentido === 'ida') ? 'selected' : ''; ?>>➡️ IDA</option>
+                    <option value="volta" <?php echo ($filtro_sentido === 'volta') ? 'selected' : ''; ?>>⬅️ VOLTA</option>
+                </select>
+            </div>
+
+            <?php if (!empty($filtro_empresa) || !empty($filtro_sentido)): ?>
+            <div class="col-auto align-self-end">
+                <a href="dashboard.php" class="btn btn-outline-danger btn-sm mb-1"><i class="bi bi-x-circle me-1"></i>Limpar</a>
+            </div>
+            <?php endif; ?>
+        </form>
+    </div>
+
     <div class="row g-3 mb-4">
-        <div class="col-md-2"><div class="card-summary card-blue"><h5>Total</h5><h3 id="count-total"><?php echo $qtd_total; ?></h3></div></div>
-        <div class="col-md-2"><div class="card-summary card-red"><h5>Atrasados</h5><h3 id="count-atrasados"><?php echo $qtd_atrasados; ?></h3></div></div>
-        <div class="col-md-2"><div class="card-summary card-green"><h5>Pontual</h5><h3 id="count-pontual"><?php echo $qtd_pontual; ?></h3></div></div>
-        <div class="col-md-2"><div class="card-summary bg-secondary"><h5>Desligados</h5><h3 id="count-desligados"><?php echo $qtd_desligados; ?></h3></div></div>
-        <div class="col-md-2"><div class="card-summary bg-info"><h5>Em Deslocamento</h5><h3 id="count-deslocamento"><?php echo $qtd_deslocamento; ?></h3></div></div>
-        <div class="col-md-2"><div class="card-summary bg-warning"><h5>Não Iniciou</h5><h3 id="count-sem-inicio"><?php echo $qtd_sem_inicio; ?></h3></div></div>
+        <div class="col-md-2"><div class="card-summary card-blue"><h5>Total</h5><h3 id="count-total">0</h3></div></div>
+        <div class="col-md-2"><div class="card-summary card-red"><h5>Atrasados</h5><h3 id="count-atrasados">0</h3></div></div>
+        <div class="col-md-2"><div class="card-summary card-green"><h5>Pontual</h5><h3 id="count-pontual">0</h3></div></div>
+        <div class="col-md-2"><div class="card-summary bg-secondary"><h5>Desligados</h5><h3 id="count-desligados">0</h3></div></div>
+        <div class="col-md-2"><div class="card-summary bg-info"><h5>Em Deslocamento</h5><h3 id="count-deslocamento">0</h3></div></div>
+        <div class="col-md-2"><div class="card-summary bg-warning"><h5>Não Iniciou</h5><h3 id="count-sem-inicio">0</h3></div></div>
     </div>
 
     <div class="card border-0 shadow-sm">
@@ -140,22 +195,37 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                     </thead>
                     <tbody id="tabela-veiculos">
     <?php 
-    date_default_timezone_set('America/Sao_Paulo'); 
-    $hora_atual = date('H:i');
-
     function diffMinutosPHP($h1, $h2) {
         if ($h1 == 'N/D' || $h2 == 'N/D') return 0;
         $t1 = strtotime($h1); $t2 = strtotime($h2);
         return ($t2 - $t1) / 60;
     }
 
+    $contador_linhas_exibidas = 0;
+
     foreach ($todas_linhas as $linha): 
-        $prog = $linha['horarioProgramado'] ?? '23:59';
-        $real = $linha['horarioReal'] ?? 'N/D';
         
-        // --- TRATAMENTO DE SENTIDO (Ida vs Volta) ---
+        // --- FILTRAGEM PHP ---
+        
+        // 1. Filtro de Empresa
+        if (!empty($filtro_empresa) && ($linha['empresa']['nome'] ?? '') !== $filtro_empresa) {
+            continue;
+        }
+
+        // 2. Filtro de Sentido
         $sIdaRaw = $linha['sentidoIDA'] ?? $linha['sentidoIda'] ?? true;
         $sentido_ida_bool = filter_var($sIdaRaw, FILTER_VALIDATE_BOOLEAN);
+        $sentido_string = $sentido_ida_bool ? 'ida' : 'volta';
+
+        if (!empty($filtro_sentido) && $sentido_string !== $filtro_sentido) {
+            continue;
+        }
+
+        $contador_linhas_exibidas++;
+
+        // --- PREPARAÇÃO DE DADOS ---
+        $prog = $linha['horarioProgramado'] ?? '23:59';
+        $real = $linha['horarioReal'] ?? 'N/D';
         $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
         
         $icon_sentido = $sentido_ida_bool 
@@ -242,6 +312,9 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
             </td>
         </tr>
     <?php endforeach; ?>
+    <?php if ($contador_linhas_exibidas === 0): ?>
+        <tr><td colspan="12" class="text-center py-4 text-muted">Nenhum veículo encontrado com os filtros selecionados.</td></tr>
+    <?php endif; ?>
 </tbody>
 </table>
 </div></div></div></div>
@@ -315,6 +388,8 @@ document.addEventListener("DOMContentLoaded", function() {
             const termo = this.value.toLowerCase();
             const linhas = document.querySelectorAll("table tbody tr");
             linhas.forEach(function(linha) {
+                // Se a linha já estiver oculta pelo PHP (não vai estar no DOM), tudo bem.
+                // Aqui filtrou o que sobrou.
                 const textoLinha = linha.textContent.toLowerCase();
                 linha.style.display = textoLinha.includes(termo) ? "" : "none";
             });
@@ -329,9 +404,8 @@ document.addEventListener("DOMContentLoaded", function() {
 
 function iniciarAtualizacaoAutomatica() {
     setInterval(async () => {
-        const indicator = document.getElementById('loading-indicator');
         try {
-            if (indicator) indicator.style.display = 'block';
+            // O window.location.href inclui os parametros GET atuais (filtros), então o refresh respeita o filtro
             const urlAtual = new URL(window.location.href);
             urlAtual.searchParams.set('t', Date.now());
             const response = await fetch(urlAtual);
@@ -344,11 +418,9 @@ function iniciarAtualizacaoAutomatica() {
             if (novoTbody && tbodyAtual && tbodyAtual.innerHTML !== novoTbody.innerHTML) {
                 tbodyAtual.innerHTML = novoTbody.innerHTML;
                 carregarPrevisoesAutomaticamente();
+                atualizarCardsResumo(); // Atualiza os cards após o refresh
             }
-            if (indicator) indicator.style.display = 'none';
-        } catch (e) { 
-            if (indicator) indicator.style.display = 'none'; 
-        }
+        } catch (e) { console.error("Erro refresh auto", e); }
     }, 30000);
 }
     
@@ -367,7 +439,7 @@ async function processarEmLotes(items, limite, callback) {
     let index = 0;
     const executar = async () => {
         if (index >= items.length) {
-            atualizarCardsResumo();
+            atualizarCardsResumo(); // Garante atualização final
             return;
         }
         const lote = Array.from(items).slice(index, index + limite);
@@ -381,17 +453,19 @@ async function processarEmLotes(items, limite, callback) {
 
 function atualizarCardsResumo() {
     let counts = { total: 0, atrasados: 0, pontual: 0, desligados: 0, deslocamento: 0, semInicio: 0 };
+    // Seleciona apenas linhas visíveis (respeitando o filtro de busca textual tbm)
     const linhas = document.querySelectorAll("table tbody tr");
-    counts.total = linhas.length;
-
+    
     linhas.forEach(row => {
+        if (row.style.display === 'none') return; // Pula se oculto pelo searchInput
+
+        counts.total++;
         const statusCell = row.cells[9];
         if (statusCell) {
             const text = statusCell.innerText.trim();
             if (text.includes("Atrasado")) {
-                // Se for (Percurso) ou (P. Inicial)
                 if (text.includes("(Inicial)") && !text.includes("Percurso")) {
-                    counts.semInicio++; // Conta como "Não Iniciou" (decisão de design anterior)
+                    counts.semInicio++; 
                 } else {
                     counts.atrasados++;
                 }
