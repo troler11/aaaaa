@@ -372,6 +372,10 @@ let routingControlFuture = null;
 let routingControlPast = null;
 let direcaoAtual = {};
 
+// --- OTIMIZAÇÃO DE PERFORMANCE: AbortController ---
+// Isso permite cancelar requisições anteriores imediatamente
+let currentController = null; 
+
 function mostrarDebug() {
     new bootstrap.Modal(document.getElementById('debugModal')).show();
 }
@@ -388,8 +392,6 @@ document.addEventListener("DOMContentLoaded", function() {
             const termo = this.value.toLowerCase();
             const linhas = document.querySelectorAll("table tbody tr");
             linhas.forEach(function(linha) {
-                // Se a linha já estiver oculta pelo PHP (não vai estar no DOM), tudo bem.
-                // Aqui filtrou o que sobrou.
                 const textoLinha = linha.textContent.toLowerCase();
                 linha.style.display = textoLinha.includes(termo) ? "" : "none";
             });
@@ -405,10 +407,11 @@ document.addEventListener("DOMContentLoaded", function() {
 function iniciarAtualizacaoAutomatica() {
     setInterval(async () => {
         try {
-            // O window.location.href inclui os parametros GET atuais (filtros), então o refresh respeita o filtro
             const urlAtual = new URL(window.location.href);
             urlAtual.searchParams.set('t', Date.now());
-            const response = await fetch(urlAtual);
+            // Adicionado signal para não travar se o usuário navegar
+            const controllerAuto = new AbortController();
+            const response = await fetch(urlAtual, { signal: controllerAuto.signal });
             const text = await response.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(text, 'text/html');
@@ -418,15 +421,23 @@ function iniciarAtualizacaoAutomatica() {
             if (novoTbody && tbodyAtual && tbodyAtual.innerHTML !== novoTbody.innerHTML) {
                 tbodyAtual.innerHTML = novoTbody.innerHTML;
                 carregarPrevisoesAutomaticamente();
-                atualizarCardsResumo(); // Atualiza os cards após o refresh
+                atualizarCardsResumo(); 
             }
-        } catch (e) { console.error("Erro refresh auto", e); }
+        } catch (e) { 
+            if (e.name !== 'AbortError') console.error("Erro refresh auto", e); 
+        }
     }, 30000);
 }
     
 const modalElement = document.getElementById('popupResultado');
 if(modalElement){
     modalElement.addEventListener('hidden.bs.modal', function () {
+        // Ao fechar, cancela qualquer busca pendente para economizar rede
+        if (currentController) {
+            currentController.abort();
+            currentController = null;
+        }
+        
         if (mapaInstancia) {
             mapaInstancia.remove();
             mapaInstancia = null;
@@ -435,11 +446,131 @@ if(modalElement){
     });
 }
 
+// --- FUNÇÃO DE BUSCA OTIMIZADA ---
+async function processarBusca(placa, localAlvo, horarioFinalProg, button, tipo) {
+    // 1. Se existir uma requisição rodando, CANCELA ela imediatamente.
+    if (currentController) {
+        currentController.abort();
+    }
+    // 2. Cria um novo controlador para a requisição atual
+    currentController = new AbortController();
+    const signal = currentController.signal;
+
+    const previsaoCell = button.closest('td'); 
+    const textoOriginal = previsaoCell.innerHTML;
+    
+    // Feedback visual
+    previsaoCell.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div>';
+    
+    if(mapaInstancia) { mapaInstancia.remove(); mapaInstancia = null; }
+    document.getElementById("mapaRota").innerHTML = ""; 
+    document.getElementById("resultadoConteudo").innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div><p class="text-muted fw-bold">Buscando dados...</p></div>`;
+    
+    new bootstrap.Modal(document.getElementById("popupResultado")).show();
+
+    try {
+        const urlPrevisao = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
+        
+        // 3. Passamos o { signal } para o fetch. Isso conecta o cancelamento.
+        const [respRastreio, respRota] = await Promise.all([
+            fetch(`/buscar_rastreamento/${placa}`, { signal }),
+            fetch(urlPrevisao, { signal })
+        ]);
+        
+        const data = await respRastreio.json();
+        const rotaData = await respRota.json();
+        
+        // Restaura botão original
+        previsaoCell.innerHTML = textoOriginal;
+
+        let latVeiculo = null, lngVeiculo = null;
+        let latDestino = null, lngDestino = null;
+        let veiculoData = (Array.isArray(data) && data.length > 0) ? data[0] : null;
+        
+        if (veiculoData) {
+            if (veiculoData.lat) { latVeiculo = veiculoData.lat; lngVeiculo = veiculoData.lng; }
+            else if (veiculoData.loc) { if (typeof veiculoData.loc === 'string') { const p = veiculoData.loc.split(','); latVeiculo = p[0]; lngVeiculo = p[1]; } else if (Array.isArray(veiculoData.loc)) { latVeiculo = veiculoData.loc[0]; lngVeiculo = veiculoData.loc[1]; } }
+            
+            const enderecoAtual = veiculoData.endereco || veiculoData.loc || 'Endereço não identificado';
+            let horarioEstimado = '--';
+            
+            if (rotaData.duracaoSegundos) {
+                 const agora = new Date();
+                 const chegada = new Date(agora.getTime() + rotaData.duracaoSegundos * 1000);
+                 const h = String(chegada.getHours()).padStart(2, '0');
+                 const m = String(chegada.getMinutes()).padStart(2, '0');
+                 horarioEstimado = `${h}:${m}`;
+            }
+
+            // Atualiza tabela se ainda estiver na tela
+            if (tipo === 'final' && horarioEstimado !== '--') {
+                const cell = document.getElementById('prev-fim-' + placa);
+                if (cell) {
+                    cell.innerText = horarioEstimado;
+                    cell.className = (horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'fw-bold text-danger' : 'fw-bold text-success';
+                    atualizarStatusBadge(cell, horarioEstimado, horarioFinalProg);
+                }
+            }
+            if (tipo === 'inicial' && horarioEstimado !== '--') {
+                const cellIni = document.getElementById('prev-ini-' + placa);
+                if (cellIni) {
+                    cellIni.innerText = horarioEstimado;
+                    cellIni.className = 'fw-bold text-info small';
+                }
+            }
+
+            const labelProg = (tipo === 'inicial') ? 'Inicial Programado' : 'Final Programado';
+            const labelEst = (tipo === 'inicial') ? 'Chegada Prevista' : 'Previsão Atualizada';
+            const statusCor = (horarioEstimado !== '--' && horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'text-danger fw-bold' : (horarioEstimado !== '--' ? 'text-success fw-bold' : 'text-dark');
+            const tituloDestino = tipo === 'inicial' ? 'Ponto Inicial' : 'Ponto Final';
+            
+            document.getElementById("resultadoConteudo").innerHTML = `
+            <div class="container-fluid px-3 pt-3">
+                <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light">
+                    <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'}</h5><span class="badge bg-success">Online</span>
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Origem</small><br><span id="txt-origem" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${enderecoAtual}</span></div></div>
+                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Destino (${tituloDestino})</small><br><span id="txt-destino" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${localAlvo || 'N/D'}</span></div></div>
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-6"><div class="p-3 border rounded bg-light shadow-sm h-100 text-center"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">${labelProg}</small><br><span class="d-block text-dark fw-semibold fs-4">${horarioFinalProg || 'N/D'}</span></div></div>
+                    <div class="col-6"><div class="p-3 border rounded shadow-sm h-100 text-center" style="background-color: #f0f8ff;"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">${labelEst}</small><br><span class="d-block fs-4 ${statusCor}">${horarioEstimado}</span></div></div>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light" style="background-color: #e0f2fe;">
+                    <strong class="text-dark" style="font-size: 1.1rem;"><i class="bi bi-stopwatch-fill me-2"></i>Estimativa:</strong>
+                    <div class="text-end"><span class="fs-4 fw-bold text-dark" id="info-tempo">${rotaData.tempo || '--'}</span><span class="text-muted mx-2">|</span><span class="fs-5 text-dark" id="info-distancia">${rotaData.distancia || '--'}</span></div>
+                </div>
+            </div>`;
+            
+            if (rotaData.lat) { latDestino = rotaData.lat; lngDestino = rotaData.lng; }
+            if (latVeiculo && lngVeiculo) {
+                gerarMapaRota(latVeiculo, lngVeiculo, latDestino, lngDestino, (veiculoData?.endereco || 'Veículo'), localAlvo, rotaData.waypoints_usados, rotaData.todos_pontos_visual, tipo);
+            } else { 
+                document.getElementById("mapaRota").innerHTML = `<div class="text-center text-muted py-5">Coordenadas indisponíveis.</div>`; 
+            }
+        } else {
+            document.getElementById("resultadoConteudo").innerHTML = `<div class="alert alert-warning m-3 text-dark">Veículo não encontrado.</div>`;
+        }
+    } catch (err) {
+        // Se foi cancelado pelo usuário (AbortError), não fazemos nada (silêncio)
+        // Se for outro erro real, mostramos
+        if (err.name === 'AbortError') {
+            console.log('Requisição cancelada pelo usuário (troca rápida).');
+        } else {
+            previsaoCell.innerHTML = textoOriginal;
+            document.getElementById("resultadoConteudo").innerHTML = `<div class='alert alert-danger m-3'>Erro: ${err.message}</div>`;
+        }
+    }
+}
+
+// ... As outras funções auxiliares (processarEmLotes, etc.) permanecem idênticas ...
+
 async function processarEmLotes(items, limite, callback) {
     let index = 0;
     const executar = async () => {
         if (index >= items.length) {
-            atualizarCardsResumo(); // Garante atualização final
+            atualizarCardsResumo(); 
             return;
         }
         const lote = Array.from(items).slice(index, index + limite);
@@ -453,11 +584,10 @@ async function processarEmLotes(items, limite, callback) {
 
 function atualizarCardsResumo() {
     let counts = { total: 0, atrasados: 0, pontual: 0, desligados: 0, deslocamento: 0, semInicio: 0 };
-    // Seleciona apenas linhas visíveis (respeitando o filtro de busca textual tbm)
     const linhas = document.querySelectorAll("table tbody tr");
     
     linhas.forEach(row => {
-        if (row.style.display === 'none') return; // Pula se oculto pelo searchInput
+        if (row.style.display === 'none') return; 
 
         counts.total++;
         const statusCell = row.cells[9];
@@ -509,7 +639,6 @@ function getHoraAtual() {
     return String(now.getHours()).padStart(2,'0') + ":" + String(now.getMinutes()).padStart(2,'0');
 }
 
-// --- LÓGICA COMPLETA E REFINADA ---
 function atualizarStatusBadge(celula, horarioEstimado, horarioProgramado) {
     const tr = celula.closest('tr');
     if (!tr) return;
@@ -527,7 +656,6 @@ function atualizarStatusBadge(celula, horarioEstimado, horarioProgramado) {
     const tolerancia = 10; 
     let htmlBadge = '';
 
-    // 1. CHECAGEM DE INÍCIO (O carro já saiu?)
     if (realInicio === 'N/D' || realInicio === '') {
         const agora = getHoraAtual();
         const diffInicio = calcularDiferencaMinutos(progInicio, agora);
@@ -537,27 +665,20 @@ function atualizarStatusBadge(celula, horarioEstimado, horarioProgramado) {
             htmlBadge = '<span class="badge bg-light text-dark border">Aguardando</span>';
         }
         statusCell.innerHTML = htmlBadge;
-        return; // Se não saiu, não calcula percurso
+        return; 
     }
 
-    // 2. CÁLCULOS
     const diffSaida = calcularDiferencaMinutos(progInicio, realInicio);
     const diffChegada = calcularDiferencaMinutos(horarioProgramado, horarioEstimado);
 
     if (sentidoIda) {
-        // === SENTIDO IDA (Foco: Chegar no horário) ===
         if (diffChegada > tolerancia) {
-            // Previsão diz que vai atrasar.
-            // Verifica SE saiu atrasado do inicial
             if (diffSaida > tolerancia) {
                 htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
             } else {
-                // Saiu no horário, mas o trânsito atrasou
                 htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
             }
         } else {
-            // Previsão OK (vai chegar a tempo).
-            // Classifica como "Pontual" mas com detalhe da saída
             if (diffSaida < -tolerancia) {
                 htmlBadge = '<span class="badge bg-info text-dark rounded-pill">Pontual (Ini. Adiantado)</span>';
             } else if (diffSaida > tolerancia) {
@@ -567,7 +688,6 @@ function atualizarStatusBadge(celula, horarioEstimado, horarioProgramado) {
             }
         }
     } else {
-        // === SENTIDO VOLTA (Foco: Sair no horário) ===
         if (diffSaida > tolerancia) {
             htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
         } else {
@@ -591,7 +711,6 @@ async function carregarPrevisoesAutomaticamente() {
             const m = String(dateCache.getMinutes()).padStart(2, '0');
             const horarioCache = `${h}:${m}`;
             celula.innerText = horarioCache;
-            // Cor da hora na tabela: vermelho se > prog (apenas alerta visual)
             celula.className = (progFim !== 'N/D' && horarioCache > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
             atualizarStatusBadge(celula, horarioCache, progFim);
             return; 
@@ -788,87 +907,6 @@ async function buscarRastreamento(placa, localfinal, horarioFinalProg, button) {
 
 async function buscarRastreamentoinicial(placa, localinicial, horarioFinalProg, button) {
     processarBusca(placa, localinicial, horarioFinalProg, button, 'inicial'); 
-}
-
-async function processarBusca(placa, localAlvo, horarioFinalProg, button, tipo) {
-    const previsaoCell = button.closest('td'); 
-    const textoOriginal = previsaoCell.innerHTML;
-    previsaoCell.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div>';
-    if(mapaInstancia) { mapaInstancia.remove(); mapaInstancia = null; }
-    document.getElementById("mapaRota").innerHTML = ""; 
-    document.getElementById("resultadoConteudo").innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div><p class="text-muted fw-bold">Buscando dados...</p></div>`;
-    new bootstrap.Modal(document.getElementById("popupResultado")).show();
-
-    try {
-        const urlPrevisao = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
-        const [respRastreio, respRota] = await Promise.all([fetch(`/buscar_rastreamento/${placa}`), fetch(urlPrevisao)]);
-        const data = await respRastreio.json();
-        const rotaData = await respRota.json();
-        previsaoCell.innerHTML = textoOriginal;
-
-        let latVeiculo = null, lngVeiculo = null;
-        let latDestino = null, lngDestino = null;
-        let veiculoData = (Array.isArray(data) && data.length > 0) ? data[0] : null;
-        if (veiculoData) {
-            if (veiculoData.lat) { latVeiculo = veiculoData.lat; lngVeiculo = veiculoData.lng; }
-            else if (veiculoData.loc) { if (typeof veiculoData.loc === 'string') { const p = veiculoData.loc.split(','); latVeiculo = p[0]; lngVeiculo = p[1]; } else if (Array.isArray(veiculoData.loc)) { latVeiculo = veiculoData.loc[0]; lngVeiculo = veiculoData.loc[1]; } }
-            const enderecoAtual = veiculoData.endereco || veiculoData.loc || 'Endereço não identificado';
-            let horarioEstimado = '--';
-            if (rotaData.duracaoSegundos) {
-                 const agora = new Date();
-                 const chegada = new Date(agora.getTime() + rotaData.duracaoSegundos * 1000);
-                 const h = String(chegada.getHours()).padStart(2, '0');
-                 const m = String(chegada.getMinutes()).padStart(2, '0');
-                 horarioEstimado = `${h}:${m}`;
-            }
-            if (tipo === 'final' && horarioEstimado !== '--') {
-                const cell = document.getElementById('prev-fim-' + placa);
-                if (cell) {
-                    cell.innerText = horarioEstimado;
-                    cell.className = (horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'fw-bold text-danger' : 'fw-bold text-success';
-                    atualizarStatusBadge(cell, horarioEstimado, horarioFinalProg);
-                }
-            }
-            if (tipo === 'inicial' && horarioEstimado !== '--') {
-                const cellIni = document.getElementById('prev-ini-' + placa);
-                if (cellIni) {
-                    cellIni.innerText = horarioEstimado;
-                    cellIni.className = 'fw-bold text-info small';
-                }
-            }
-            const labelProg = (tipo === 'inicial') ? 'Inicial Programado' : 'Final Programado';
-            const labelEst = (tipo === 'inicial') ? 'Chegada Prevista' : 'Previsão Atualizada';
-            const statusCor = (horarioEstimado !== '--' && horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'text-danger fw-bold' : (horarioEstimado !== '--' ? 'text-success fw-bold' : 'text-dark');
-            const tituloDestino = tipo === 'inicial' ? 'Ponto Inicial' : 'Ponto Final';
-            document.getElementById("resultadoConteudo").innerHTML = `
-            <div class="container-fluid px-3 pt-3">
-                <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light">
-                    <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'}</h5><span class="badge bg-success">Online</span>
-                </div>
-                <div class="row g-2 mb-3">
-                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Origem</small><br><span id="txt-origem" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${enderecoAtual}</span></div></div>
-                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Destino (${tituloDestino})</small><br><span id="txt-destino" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${localAlvo || 'N/D'}</span></div></div>
-                </div>
-                <div class="row g-2 mb-3">
-                    <div class="col-6"><div class="p-3 border rounded bg-light shadow-sm h-100 text-center"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">${labelProg}</small><br><span class="d-block text-dark fw-semibold fs-4">${horarioFinalProg || 'N/D'}</span></div></div>
-                    <div class="col-6"><div class="p-3 border rounded shadow-sm h-100 text-center" style="background-color: #f0f8ff;"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">${labelEst}</small><br><span class="d-block fs-4 ${statusCor}">${horarioEstimado}</span></div></div>
-                </div>
-                <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light" style="background-color: #e0f2fe;">
-                    <strong class="text-dark" style="font-size: 1.1rem;"><i class="bi bi-stopwatch-fill me-2"></i>Estimativa:</strong>
-                    <div class="text-end"><span class="fs-4 fw-bold text-dark" id="info-tempo">${rotaData.tempo || '--'}</span><span class="text-muted mx-2">|</span><span class="fs-5 text-dark" id="info-distancia">${rotaData.distancia || '--'}</span></div>
-                </div>
-            </div>`;
-            if (rotaData.lat) { latDestino = rotaData.lat; lngDestino = rotaData.lng; }
-            if (latVeiculo && lngVeiculo) {
-                gerarMapaRota(latVeiculo, lngVeiculo, latDestino, lngDestino, (veiculoData?.endereco || 'Veículo'), localAlvo, rotaData.waypoints_usados, rotaData.todos_pontos_visual, tipo);
-            } else { document.getElementById("mapaRota").innerHTML = `<div class="text-center text-muted py-5">Coordenadas indisponíveis.</div>`; }
-        } else {
-            document.getElementById("resultadoConteudo").innerHTML = `<div class="alert alert-warning m-3 text-dark">Veículo não encontrado.</div>`;
-        }
-    } catch (err) {
-        previsaoCell.innerHTML = textoOriginal;
-        document.getElementById("resultadoConteudo").innerHTML = `<div class='alert alert-danger m-3'>Erro: ${err.message}</div>`;
-    }
 }
 </script>
 </body>
