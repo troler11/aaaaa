@@ -1,116 +1,199 @@
 <?php
 
 // ==============================================================================
-// CONFIGURAÇÃO & CONSTANTES
+// 1. CONFIGURAÇÕES DE PERFORMANCE & CACHE
 // ==============================================================================
-define('TOMTOM_KEYS', [
-    "teste",
+
+// Tempo em segundos para manter os dados da Linha em cache (5 min)
+define('CACHE_TTL_DASHBOARD', 300); 
+
+// Configuração de Pastas (Voltando ao padrão original: Pasta Temporária do Sistema)
+$cookie_dir = __DIR__ . '/cookies';
+if (!file_exists($cookie_dir)) @mkdir($cookie_dir, 0777, true);
+
+// Arquivo de Cookie (Mantém na pasta do script para persistência de sessão)
+define('COOKIE_FILE', $cookie_dir . '/sessao_api.txt');
+
+// Arquivo de Cache do Dashboard (Volta para a pasta temporária do sistema)
+define('CACHE_FILE_DASH', sys_get_temp_dir() . '/dashboard_main_data.json');
+
+// Chaves TomTom
+$keys_tomtom = [
     "8iGI69ukjIFE8M5XwE2aVHJOcmRlhfwR",
     "vbdLg3miOthQgBBkTjZyAaj0TmBoyIGv",
     "WquMopwFZcPTeG4s6WkxkzhnMM3w1OGH",
     "ZQx0TqIl2gkDsgF3Yw4G4qwQG6jKp77N",
     "GK7A9HjGG0cOSN1UqADrkifoN0HExUzy"
-]);
-
-define('COOKIE_FILE', sys_get_temp_dir() . '/cookie_rastreamento_api.txt');
-
-/**
- * Verifica autenticação rapidamente
- */
-function verificar_auth() {
-    if (empty($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true) {
-        responder_json(["erro" => "Não autorizado"], 401);
-    }
-}
-
-/**
- * Limpa a placa para padrão API
- */
-function limpar_placa($placa) {
-    return preg_replace("/[^A-Za-z0-9]/", '', strtoupper($placa));
-}
+];
+shuffle($keys_tomtom); 
+define('TOMTOM_KEYS', $keys_tomtom);
 
 // ==============================================================================
-// HELPERS (Funções Auxiliares)
+// 2. MOTOR DE CONEXÃO OTIMIZADO (cURL Ninja)
 // ==============================================================================
 
 /**
- * Realiza o aquecimento da sessão APENAS SE NECESSÁRIO.
- * Regra: Executa 1 vez a cada 20 minutos (1200 segundos) por usuário.
+ * Configura o cURL para máxima velocidade e compatibilidade
+ */
+function curl_fast_setup($ch, $url) {
+    $host = parse_url($url, PHP_URL_HOST);
+    
+    // Headers de Navegador (Chrome) + Compressão GZIP
+    $headers = [
+        "Host: $host",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept: application/json, text/plain, */*",
+        "Accept-Encoding: gzip, deflate, br", // Importante: Aceita compressão
+        "Connection: keep-alive",
+        "Upgrade-Insecure-Requests: 1"
+    ];
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_COOKIEJAR      => COOKIE_FILE,
+        CURLOPT_COOKIEFILE     => COOKIE_FILE,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 3,
+        CURLOPT_TIMEOUT        => 10, 
+        CURLOPT_CONNECTTIMEOUT => 4,
+        CURLOPT_ENCODING       => "", // Decodifica GZIP automaticamente
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1
+    ]);
+}
+
+/**
+ * Realiza o aquecimento APENAS se necessário
  */
 function garantir_aquecimento() {
     global $URL_MAPA;
     
-    $agora = time();
-    $ultimo_aquecimento = $_SESSION['last_api_warmup'] ?? 0;
-    
-    // Se nunca aqueceu ou se o último aquecimento foi há mais de 20 minutos
-    if (($agora - $ultimo_aquecimento) > 1200) {
-        // Faz o request de "aquecimento" para gerar cookies/tokens
-        fazer_requisicao_resiliente('GET', $URL_MAPA, null, []);
-        
-        // Atualiza o timestamp na sessão
-        $_SESSION['last_api_warmup'] = $agora;
+    // Verifica se o cookie existe e é recente (< 15 min)
+    if (file_exists(COOKIE_FILE) && filesize(COOKIE_FILE) > 0) {
+        if (isset($_SESSION['last_api_warmup']) && (time() - $_SESSION['last_api_warmup']) < 900) {
+            return;
+        }
+    }
+
+    if (file_exists(COOKIE_FILE)) @unlink(COOKIE_FILE);
+
+    $ch = curl_init($URL_MAPA);
+    curl_fast_setup($ch, $URL_MAPA);
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($http_code >= 400) {
+        if (!file_exists(COOKIE_FILE)) touch(COOKIE_FILE);
+    } else {
+        $_SESSION['last_api_warmup'] = time();
     }
 }
 
-/**
- * Tenta normalizar coordenadas de formatos variados da API
- */
-function extrair_coordenadas($veiculo) {
-    $lat = 0; $lon = 0;
-    
-    // Tentativa 1: Array [lat, lon]
-    if (isset($veiculo['loc']) && is_array($veiculo['loc']) && count($veiculo['loc']) >= 2) {
-        return [(float)$veiculo['loc'][0], (float)$veiculo['loc'][1]];
-    }
-    
-    // Tentativa 2: String "lat,lon"
-    if (isset($veiculo['loc']) && is_string($veiculo['loc']) && strpos($veiculo['loc'], ",") !== false) {
-        $p = explode(",", str_replace(["[", "]"], "", $veiculo['loc']));
-        return [(float)$p[0], (float)$p[1]];
-    }
+// ==============================================================================
+// 3. FUNÇÕES DE NEGÓCIO
+// ==============================================================================
 
-    // Tentativa 3: Campos separados
-    $lat = (float)($veiculo['latitude'] ?? 0);
-    $lon = (float)($veiculo['longitude'] ?? 0);
-
-    return ($lat != 0 && $lon != 0) ? [$lat, $lon] : null;
+function limpar_placa($placa) {
+    return preg_replace("/[^A-Za-z0-9]/", '', strtoupper($placa));
 }
 
-/**
- * Busca posição do veículo
- */
+function responder_json($dados, $status = 200) {
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    // Compacta resposta para o cliente se possível
+    if (in_array('ob_gzhandler', ob_list_handlers()) === false) {
+        ob_start('ob_gzhandler');
+    }
+    echo json_encode($dados);
+    exit;
+}
+
 function get_veiculo_posicao($placa_clean) {
     global $URL_API_RASTREAMENTO;
     
-    // Garante que a sessão está "quente" (só executa se necessário)
     garantir_aquecimento();
-    
-    // Payload padrão
+
     $payload = ["placa_ou_identificacao" => $placa_clean, "index_view_ft" => "7259"];
     
-    // Chamada
-    list($resp_body, $http_code, $erro) = fazer_requisicao_resiliente('POST', $URL_API_RASTREAMENTO, $payload, []);
+    $ch = curl_init($URL_API_RASTREAMENTO);
+    curl_fast_setup($ch, $URL_API_RASTREAMENTO);
+    
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($payload));
+    
+    // Header Ajax
+    $host = parse_url($URL_API_RASTREAMENTO, PHP_URL_HOST);
+    $scheme = parse_url($URL_API_RASTREAMENTO, PHP_URL_SCHEME);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array_merge(
+        curl_getinfo($ch, CURLINFO_HEADER_OUT) ?: [],
+        ["X-Requested-With: XMLHttpRequest", "Origin: $scheme://$host"]
+    ));
 
-    if ($erro || $http_code >= 400) {
-        throw new Exception($erro ?? "Erro ao consultar API de Rastreamento ($http_code)");
+    $resp_body = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($http_code >= 400 || !$resp_body) {
+        @unlink(COOKIE_FILE);
+        throw new Exception("Erro de comunicação ($http_code). Tente novamente.");
     }
 
     $dados = json_decode($resp_body, true);
     if (empty($dados) || !isset($dados[0])) {
-        throw new Exception("Veículo não localizado na API.");
+        if (strpos($resp_body, '<html') !== false) {
+             @unlink(COOKIE_FILE);
+             throw new Exception("Sessão renovada. Tente novamente.");
+        }
+        throw new Exception("Veículo não localizado.");
     }
 
     return $dados[0];
 }
 
 /**
- * Rotação de chaves TomTom e cálculo de rota
+ * Busca dados do Dashboard usando o CACHE do sistema (sys_get_temp_dir)
  */
-function calcular_rota_tomtom($locations_string) {
-    $ultimo_erro = "";
+function get_dados_dashboard_cached() {
+    global $URL_DASHBOARD_MAIN, $HEADERS_DASHBOARD_MAIN;
+
+    // 1. Tenta ler do cache temporário
+    if (file_exists(CACHE_FILE_DASH)) {
+        $idade = time() - filemtime(CACHE_FILE_DASH);
+        if ($idade < CACHE_TTL_DASHBOARD) {
+            // Cache válido! Retorna rápido.
+            return json_decode(file_get_contents(CACHE_FILE_DASH), true);
+        }
+    }
+
+    // 2. Se não tem ou expirou, baixa novo
+    $ch = curl_init($URL_DASHBOARD_MAIN);
+    curl_fast_setup($ch, $URL_DASHBOARD_MAIN);
+    if (!empty($HEADERS_DASHBOARD_MAIN)) {
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $HEADERS_DASHBOARD_MAIN);
+    }
     
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($code == 200 && $resp) {
+        // Salva no cache (sys_get_temp_dir)
+        file_put_contents(CACHE_FILE_DASH, $resp);
+        return json_decode($resp, true);
+    }
+
+    // Fallback: Se der erro, tenta usar o cache velho mesmo vencido
+    if (file_exists(CACHE_FILE_DASH)) {
+        return json_decode(file_get_contents(CACHE_FILE_DASH), true);
+    }
+
+    throw new Exception("Falha ao obter dados do Dashboard.");
+}
+
+function calcular_rota_tomtom($locations_string) {
     foreach (TOMTOM_KEYS as $key) {
         if ($key === "teste") continue; 
 
@@ -119,219 +202,128 @@ function calcular_rota_tomtom($locations_string) {
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 15,
-            CURLOPT_HTTPHEADER => ["Content-Type: application/json"]
+            CURLOPT_TIMEOUT => 8,
+            CURLOPT_ENCODING => "gzip", 
+            CURLOPT_SSL_VERIFYPEER => false
         ]);
         
         $body = curl_exec($ch);
         $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        if ($code == 200) {
-            $resultado = json_decode($body, true);
-            if ($resultado) {
-                return $resultado;
-            }
-        }
-        $ultimo_erro = "Status $code";
+        if ($code == 200) return json_decode($body, true);
     }
-    
-    throw new Exception("Falha TomTom (Todas as chaves esgotadas). Último erro: $ultimo_erro");
+    throw new Exception("Serviço de rotas indisponível temporariamente.");
 }
 
 // ==============================================================================
-// HANDLERS (Controladores das Rotas)
+// 4. HANDLERS (Controladores)
 // ==============================================================================
 
-/**
- * /buscar_rastreamento/<placa>
- */
 function handle_buscar_rastreamento($placa) {
-    verificar_auth();
-    global $URL_API_RASTREAMENTO;
-
-    $placa_clean = limpar_placa($placa);
-
-    // 1. Aquecimento Inteligente (Só roda na primeira vez ou após expirar)
-    garantir_aquecimento();
-
-    // 2. Configuração do Request
-    $payload = [
-        "placa_ou_identificacao" => $placa_clean, 
-        "index_view_ft" => "7259" 
-    ];
-
-    $headers = []; 
-
-    // 3. Execução
-    list($body, $code, $erro) = fazer_requisicao_resiliente('POST', $URL_API_RASTREAMENTO, $payload, $headers);
-
-    if ($erro) {
-        responder_json(["erro" => $erro], 500);
+    try {
+        $placa_clean = limpar_placa($placa);
+        $veiculo = get_veiculo_posicao($placa_clean);
+        responder_json([$veiculo]); 
+    } catch (Exception $e) {
+        responder_json(["erro" => $e->getMessage()], 500);
     }
-
-    // 4. Validação
-    $json = json_decode($body);
-    if ($json === null && json_last_error() !== JSON_ERROR_NONE) {
-        // Tenta limpar buffer se houver erro soft, ou força re-aquecimento na próxima
-        $_SESSION['last_api_warmup'] = 0; // Força re-aquecimento na próxima tentativa se falhou
-        
-        responder_json([
-            "erro" => "API recusou o formato", 
-            "resposta_servidor" => strip_tags(substr($body, 0, 300)),
-            "status" => $code
-        ], 502);
-    }
-
-    http_response_code($code);
-    header('Content-Type: application/json; charset=utf-8');
-    echo $body;
-    exit;
 }
 
-/**
- * /previsao/<placa>
- */
 function handle_calcular_rota($placa, $tipo_destino = "Final") {
-    verificar_auth();
-    global $URL_DASHBOARD_MAIN, $HEADERS_DASHBOARD_MAIN;
-
     try {
         $placa_clean = limpar_placa($placa);
 
-        // 1. Obter Veículo (Já inclui o aquecimento inteligente dentro da função)
+        // 1. Pega Veículo
         $veiculo = get_veiculo_posicao($placa_clean);
-        $coords_atual = extrair_coordenadas($veiculo);
         
-        if (!$coords_atual) {
-            responder_json(["erro" => "Coordenadas inválidas recebidas da API."], 422);
-        }
-        list($lat1, $lon1) = $coords_atual;
+        $lat1 = 0; $lon1 = 0;
+        if (isset($veiculo['loc']) && is_array($veiculo['loc'])) { $lat1 = (float)$veiculo['loc'][0]; $lon1 = (float)$veiculo['loc'][1]; }
+        elseif (isset($veiculo['latitude'])) { $lat1 = (float)$veiculo['latitude']; $lon1 = (float)$veiculo['longitude']; }
+        
+        if ($lat1 == 0) responder_json(["erro" => "Coordenadas inválidas."], 422);
 
-        // 2. Obter Dados da Linha (Cache de Arquivo)
-        $cache_file = sys_get_temp_dir() . '/dashboard_main_data.json';
-        $data_dash = null;
+        // 2. Pega Dados do Dashboard (COM CACHE)
+        $data_dash = get_dados_dashboard_cached();
 
-        if (file_exists($cache_file)) {
-            $data_dash = json_decode(file_get_contents($cache_file), true);
-        }
-
-        if (!$data_dash) {
-            list($resp, $code, $err) = simple_get($URL_DASHBOARD_MAIN, $HEADERS_DASHBOARD_MAIN, 30);
-            if ($err || $code >= 400) responder_json(["erro" => "Falha API Dashboard"], 500);
-            $data_dash = json_decode($resp, true);
-        }
-
-        // Busca Linha Específica
-        $todas_linhas = array_merge(
-            $data_dash['linhasAndamento'] ?? [],
-            $data_dash['linhasCarroDesligado'] ?? [],
-            $data_dash['linhasComecaramSemPrimeiroPonto'] ?? []
-        );
-
+        // Procura a linha
         $linha_alvo = null;
-        foreach ($todas_linhas as $l) {
-            if (($l['veiculo']['veiculo'] ?? '') == $placa) {
-                $linha_alvo = $l; break;
-            }
-        }
-
-        if (!$linha_alvo) responder_json(["erro" => "Linha não encontrada para este veículo."], 404);
-
-        // 3. Processar Pontos e Waypoints
-        $pontos_mapa = [];
-        $tomtom_string_coords = ["$lat1,$lon1"]; 
-        $coords_visual = [[$lon1, $lat1]];
+        $grupos = ['linhasAndamento', 'linhasCarroDesligado', 'linhasComecaramSemPrimeiroPonto'];
         
-        $paradas = $linha_alvo['pontoDeParadas'] ?? [];
-        
-        $ponto_inicial = null;
-        $paradas_intermediarias = [];
-        $ponto_final = null;
-
-        foreach ($paradas as $p) {
-            $plat = (float)($p['latitude'] ?? 0);
-            $plng = (float)($p['longitude'] ?? 0);
-            if ($plat == 0) continue;
-
-            $tipo = strtolower($p['tipoPonto']['tipo'] ?? '');
-            $dados_ponto = [
-                "lat" => $plat, "lng" => $plng, 
-                "passou" => ($p['passou'] ?? false), 
-                "nome" => $p['descricao'] ?? 'Ponto'
-            ];
-
-            if ($tipo == 'inicial') $ponto_inicial = $dados_ponto;
-            elseif ($tipo == 'final') $ponto_final = $dados_ponto;
-            else $paradas_intermediarias[] = $dados_ponto;
-        }
-
-        if ($ponto_inicial) $pontos_mapa[] = $ponto_inicial;
-        foreach ($paradas_intermediarias as $p) $pontos_mapa[] = $p;
-        if ($ponto_final) $pontos_mapa[] = $ponto_final;
-
-        $lat2 = null; $lon2 = null;
-        if (!empty($pontos_mapa)) {
-            if ($tipo_destino == 'Inicial') {
-                $pAlvo = $pontos_mapa[0];
-            } else {
-                $pAlvo = end($pontos_mapa);
-            }
-            $lat2 = $pAlvo['lat'];
-            $lon2 = $pAlvo['lng'];
-        }
-
-        if (!$lat2) responder_json(["erro" => "Destino não determinado."], 400);
-
-        // Lógica de Waypoints
-        if ($tipo_destino === 'Inicial') {
-            $tomtom_string_coords[] = "$lat2,$lon2";
-            $coords_visual[] = [$lon2, $lat2];
-        } else {
-            $encontrou_destino = false;
-            foreach ($pontos_mapa as $p) {
-                if (!$p['passou']) {
-                    $tomtom_string_coords[] = "{$p['lat']},{$p['lng']}";
-                    $coords_visual[] = [$p['lng'], $p['lat']];
-                    
-                    if ($p['lat'] == $lat2 && $p['lng'] == $lon2) {
-                        $encontrou_destino = true;
-                    }
+        foreach ($grupos as $grupo) {
+            if (empty($data_dash[$grupo])) continue;
+            foreach ($data_dash[$grupo] as $l) {
+                if (($l['veiculo']['veiculo'] ?? '') == $placa) {
+                    $linha_alvo = $l; 
+                    break 2;
                 }
             }
-            if (!$encontrou_destino) {
-                $tomtom_string_coords[] = "$lat2,$lon2";
+        }
+
+        if (!$linha_alvo) responder_json(["erro" => "Linha não encontrada."], 404);
+
+        // 3. Processa Pontos
+        $pontos_mapa = [];
+        $paradas = $linha_alvo['pontoDeParadas'] ?? [];
+        
+        $p_ini = null; $p_fim = null; $p_meio = [];
+        
+        foreach ($paradas as $p) {
+            $plat = (float)($p['latitude']??0); $plng = (float)($p['longitude']??0);
+            if ($plat == 0) continue;
+            
+            $d = ["lat"=>$plat, "lng"=>$plng, "passou"=>($p['passou']??false), "nome"=>$p['descricao']??'Ponto'];
+            $tipo = strtolower($p['tipoPonto']['tipo']??'');
+
+            if ($tipo == 'inicial') $p_ini = $d;
+            elseif ($tipo == 'final') $p_fim = $d;
+            else $p_meio[] = $d;
+        }
+
+        if ($p_ini) $pontos_mapa[] = $p_ini;
+        foreach ($p_meio as $p) $pontos_mapa[] = $p;
+        if ($p_fim) $pontos_mapa[] = $p_fim;
+
+        if (empty($pontos_mapa)) responder_json(["erro" => "Rota sem pontos."], 400);
+
+        // Define Destino
+        $pAlvo = ($tipo_destino == 'Inicial') ? $pontos_mapa[0] : end($pontos_mapa);
+        $lat2 = $pAlvo['lat']; $lon2 = $pAlvo['lng'];
+
+        // 4. Monta Waypoints para TomTom
+        $coords_tomtom = ["$lat1,$lon1"];
+        $coords_visual = [[$lon1, $lat1]];
+
+        if ($tipo_destino === 'Inicial') {
+            $coords_tomtom[] = "$lat2,$lon2";
+            $coords_visual[] = [$lon2, $lat2];
+        } else {
+            $encontrou = false;
+            foreach ($pontos_mapa as $p) {
+                if (!$p['passou']) {
+                    $coords_tomtom[] = "{$p['lat']},{$p['lng']}";
+                    $coords_visual[] = [$p['lng'], $p['lat']]; 
+                    if ($p['lat'] == $lat2 && $p['lng'] == $lon2) $encontrou = true;
+                }
+            }
+            if (!$encontrou) { 
+                $coords_tomtom[] = "$lat2,$lon2"; 
                 $coords_visual[] = [$lon2, $lat2];
             }
         }
 
-        // 4. Calcular Rota TomTom
-        $tomtom_data = calcular_rota_tomtom(implode(':', $tomtom_string_coords));
-
-        // 5. Processar Resultados
+        // 5. Calcula Rota
+        $tomtom_data = calcular_rota_tomtom(implode(':', $coords_tomtom));
         $summary = $tomtom_data["routes"][0]["summary"] ?? ["travelTimeInSeconds" => 0, "lengthInMeters" => 0];
+        
         $segundos = (int)$summary["travelTimeInSeconds"];
-        $metros = (int)$summary["lengthInMeters"];
-
-        // Cache de Previsão
-        if ($tipo_destino == 'Final' && $segundos > 0) {
-            $f_cache = sys_get_temp_dir() . '/tomtom_predictions.json';
-            $c_data = file_exists($f_cache) ? json_decode(file_get_contents($f_cache), true) : [];
-            if (!is_array($c_data)) $c_data = [];
-            
-            $c_data[$placa] = ['arrival_ts' => time() + $segundos, 'updated_at' => time()];
-            file_put_contents($f_cache, json_encode($c_data));
-        }
-
         $horas = floor($segundos / 3600);
         $minutos = floor(($segundos % 3600) / 60);
-        $tempo_txt = $horas > 0 ? "{$horas}h {$minutos}min" : "{$minutos} min";
 
         responder_json([
-            "tempo" => $tempo_txt,
-            "distancia" => sprintf("%.2f km", $metros / 1000),
-            "lat" => $lat2,
-            "lng" => $lon2,
+            "tempo" => ($horas > 0 ? "{$horas}h " : "") . "{$minutos} min",
+            "distancia" => sprintf("%.2f km", $summary["lengthInMeters"] / 1000),
+            "lat" => $lat2, "lng" => $lon2,
             "duracaoSegundos" => $segundos,
             "waypoints_usados" => $coords_visual,
             "todos_pontos_visual" => $pontos_mapa,
