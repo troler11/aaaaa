@@ -1,26 +1,26 @@
-# Usa uma imagem oficial do PHP com Apache
 FROM php:8.2-apache
 
-# Instala dependências do sistema
+# Instala dependências e extensões
 RUN apt-get update && apt-get install -y \
     libcurl4-openssl-dev \
     git \
-    unzip
+    unzip \
+    && docker-php-ext-install curl session pdo pdo_mysql
 
-# Instala extensões do PHP
-# AQUI ESTÁ A CORREÇÃO: Adicionamos 'pdo' e 'pdo_mysql'
-RUN docker-php-ext-install curl session pdo pdo_mysql
-
-# Ativa o mod_rewrite do Apache (para rotas funcionarem)
+# Ativa o módulo de reescrita do Apache
 RUN a2enmod rewrite
 
-# Copia todos os arquivos do seu projeto para a pasta do servidor
+# --- CORREÇÃO DO ERRO 404 ---
+# Configura o Apache para aceitar o arquivo .htaccess na pasta /var/www/html
+# Isso troca "AllowOverride None" por "AllowOverride All" nas configurações
+RUN sed -i 's/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf
+
+# Copia os arquivos
 COPY . /var/www/html/
 
-# Configura permissões para a pasta de cookies (CRÍTICO para sua API funcionar)
+# Permissões da pasta de cookies
 RUN mkdir -p /var/www/html/cookies && \
     chown -R www-data:www-data /var/www/html && \
     chmod -R 777 /var/www/html/cookies
 
-# Expõe a porta 80
 EXPOSE 80
