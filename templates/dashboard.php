@@ -941,4 +941,3 @@ async function buscarRastreamentoinicial(placa, localinicial, horarioFinalProg, 
 </script>
 </body>
 </html>
-
