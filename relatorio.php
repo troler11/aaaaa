@@ -314,11 +314,11 @@ document.addEventListener("DOMContentLoaded", function() {
     // 1. Carrega imediatamente ao abrir
     carregarPrevisoesLive();
 
-    // 2. Configura para atualizar a cada 60 segundos (60000 ms)
+    // 2. Configura para atualizar a cada 3 min
     setInterval(() => {
         console.log("Atualizando previsões live...");
         carregarPrevisoesLive();
-    }, 60000);
+    }, 180000);
 });
 
 async function processarEmLotes(items, limite, callback) {
