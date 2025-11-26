@@ -311,7 +311,14 @@ foreach ($linhas_totais as $l) {
 
 <script>
 document.addEventListener("DOMContentLoaded", function() {
+    // 1. Carrega imediatamente ao abrir
     carregarPrevisoesLive();
+
+    // 2. Configura para atualizar a cada 60 segundos (60000 ms)
+    setInterval(() => {
+        console.log("Atualizando previsões live...");
+        carregarPrevisoesLive();
+    }, 60000);
 });
 
 async function processarEmLotes(items, limite, callback) {
@@ -328,24 +335,26 @@ async function processarEmLotes(items, limite, callback) {
 }
 
 async function carregarPrevisoesLive() {
-    // Seleciona apenas linhas que já saíram (data-calcular="true")
+    // Seleciona apenas linhas que já saíram
     const linhas = document.querySelectorAll('.linha-relatorio[data-calcular="true"]');
     
     await processarEmLotes(linhas, 5, async (tr) => {
-       const placa = tr.getAttribute('data-placa');
-const idLinha = tr.getAttribute('data-id'); // <--- NOVO: Pega o ID
-const cellPrev = document.getElementById('prev-termino-' + placa);
-const cellRest = document.getElementById('tempo-rest-' + placa);
+        const placa = tr.getAttribute('data-placa');
+        const idLinha = tr.getAttribute('data-id'); 
+        
+        // Elementos para atualizar
+        const cellPrev = document.getElementById('prev-termino-' + placa);
+        const cellRest = document.getElementById('tempo-rest-' + placa);
         
         if (!placa || !cellPrev) return;
 
-        // Indicador visual de carregamento (opcional, mas bom para UX)
-        // cellRest.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
+        // Opcional: Colocar um "..." discreto ou mudar cor para indicar que está checando
+        // cellRest.style.opacity = "0.5";
 
         try {
-    // <--- ALTERADO: Envia o ID como parâmetro na URL
-    const response = await fetch(`/previsao/${placa}?linhaId=${idLinha}`);
-    const data = await response.json();
+            // --- CORREÇÃO IMPORTANTE: O nome do parâmetro deve ser idLinha para bater com o PHP ---
+            const response = await fetch(`/previsao/${placa}?idLinha=${idLinha}`);
+            const data = await response.json();
 
             if (data.duracaoSegundos) {
                 // --- CÁLCULO MATEMÁTICO LIVE ---
@@ -360,13 +369,21 @@ const cellRest = document.getElementById('tempo-rest-' + placa);
                 // Formata Tempo Restante (Minutos)
                 const minutosRestantes = Math.round(data.duracaoSegundos / 60);
 
-                // Atualiza HTML
+                // Atualiza HTML com animação visual de sucesso
                 cellPrev.innerHTML = `${horarioChegadaLive} <small class="text-success fw-bold">(Live)</small>`;
+                
+                // Muda cor dependendo do tempo
+                if(minutosRestantes < 10) {
+                    cellRest.className = "fw-bold text-danger blink-animation"; // Piscando se estiver chegando
+                } else {
+                    cellRest.className = "fw-bold text-primary";
+                }
                 cellRest.innerHTML = `${minutosRestantes} min`;
             }
         } catch (error) {
-            // Se der erro ou timeout, mantém o valor projetado pelo PHP (silenciosamente)
             console.warn(`Erro ao buscar previsão para ${placa}`, error);
+        } finally {
+            // cellRest.style.opacity = "1";
         }
     });
 }
