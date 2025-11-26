@@ -205,6 +205,9 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
 
     foreach ($todas_linhas as $linha): 
         
+        // --- EXTRAÇÃO DO ID DA LINHA ---
+        $id_linha = $linha['idLinha'] ?? '';
+
         // --- FILTRAGEM PHP ---
         
         // 1. Filtro de Empresa
@@ -251,7 +254,8 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
              $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
         }
 
-        $tr_attr = ($atraso_saida ? 'data-atraso-tipo="saida"' : '') . ' data-sentido-ida="' . $sentido_ida_attr . '"';
+        // Adicionando ID da linha no atributo data
+        $tr_attr = ($atraso_saida ? 'data-atraso-tipo="saida"' : '') . ' data-sentido-ida="' . $sentido_ida_attr . '" data-id-linha="' . htmlspecialchars($id_linha) . '"';
         
         $placa_clean = htmlspecialchars($linha['veiculo']['veiculo'] ?? '', ENT_QUOTES);
         $id_prev_fim = "prev-fim-" . $placa_clean;
@@ -290,7 +294,8 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                 data-placa="<?php echo $data_placa; ?>"
                 data-prog-fim="<?php echo $data_prog_fim; ?>"
                 data-ts-cache="<?php echo $timestamp_cache; ?>" 
-                data-calcular="<?php echo $deve_calcular; ?>">
+                data-calcular="<?php echo $deve_calcular; ?>"
+                data-id-linha="<?php echo htmlspecialchars($id_linha); ?>">
                 <?php echo $valor_cache; ?>
             </td>
 
@@ -300,13 +305,13 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
             </td>
              <td class="text-center">
                 <button class="btn btn-outline-primary btn-xs rounded-circle" title="Prev. Inicial"
-                    onclick="buscarRastreamentoinicial('<?php echo $placa_clean; ?>', '<?php echo htmlspecialchars($linha['localinicial'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($linha['horarioProgramado'] ?? 'N/D', ENT_QUOTES); ?>', this)">
+                    onclick="buscarRastreamentoinicial('<?php echo $placa_clean; ?>', '<?php echo htmlspecialchars($linha['localinicial'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($linha['horarioProgramado'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($id_linha); ?>', this)">
                     <i class="bi bi-clock"></i>
                 </button>
             </td>
             <td class="text-center">
                 <button class="btn btn-primary btn-sm rounded-circle shadow-sm" 
-                    onclick="buscarRastreamento('<?php echo $placa_clean; ?>', '<?php echo htmlspecialchars($linha['localfinal'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES); ?>', this)">
+                    onclick="buscarRastreamento('<?php echo $placa_clean; ?>', '<?php echo htmlspecialchars($linha['localfinal'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($id_linha); ?>', this)">
                     <i class="bi bi-geo-alt-fill"></i>
                 </button>
             </td>
@@ -372,9 +377,9 @@ let routingControlFuture = null;
 let routingControlPast = null;
 let direcaoAtual = {};
 
-// --- OTIMIZAÇÃO DE PERFORMANCE: AbortController ---
-// Isso permite cancelar requisições anteriores imediatamente
-let currentController = null; 
+// --- CONTROLE DE CONCORRÊNCIA ---
+let currentController = null; // Para cancelar requisições HTTP
+let renderToken = 0;          // Para cancelar desenhos de mapa antigos
 
 function mostrarDebug() {
     new bootstrap.Modal(document.getElementById('debugModal')).show();
@@ -437,17 +442,25 @@ if(modalElement){
             currentController.abort();
             currentController = null;
         }
-        
-        if (mapaInstancia) {
-            mapaInstancia.remove();
-            mapaInstancia = null;
-        }
-        document.getElementById("mapaRota").innerHTML = "";
+        renderToken++; // Invalida qualquer desenho pendente
+        limparMapaSeguro();
     });
 }
 
-// --- FUNÇÃO DE BUSCA OTIMIZADA ---
-async function processarBusca(placa, localAlvo, horarioFinalProg, button, tipo) {
+function limparMapaSeguro() {
+    if (mapaInstancia) {
+        try {
+            mapaInstancia.off();
+            mapaInstancia.remove();
+        } catch(e) { console.warn("Erro ao limpar mapa", e); }
+        mapaInstancia = null;
+    }
+    const divMapa = document.getElementById("mapaRota");
+    if(divMapa) divMapa.innerHTML = "";
+}
+
+// --- FUNÇÃO DE BUSCA OTIMIZADA COM ID DA LINHA ---
+async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, button, tipo) {
     // 1. Se existir uma requisição rodando, CANCELA ela imediatamente.
     if (currentController) {
         currentController.abort();
@@ -455,6 +468,10 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, button, tipo) 
     // 2. Cria um novo controlador para a requisição atual
     currentController = new AbortController();
     const signal = currentController.signal;
+    
+    // 3. Cria Token Único para este clique
+    const meuToken = Date.now();
+    renderToken = meuToken;
 
     const previsaoCell = button.closest('td'); 
     const textoOriginal = previsaoCell.innerHTML;
@@ -462,26 +479,31 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, button, tipo) 
     // Feedback visual
     previsaoCell.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div>';
     
-    if(mapaInstancia) { mapaInstancia.remove(); mapaInstancia = null; }
-    document.getElementById("mapaRota").innerHTML = ""; 
-    document.getElementById("resultadoConteudo").innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div><p class="text-muted fw-bold">Buscando dados...</p></div>`;
+    limparMapaSeguro(); // Garante tela limpa antes de começar
+    document.getElementById("resultadoConteudo").innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div><p class="text-muted fw-bold">Buscando dados...</p><small class="text-muted">Linha ID: ${idLinha}</small></div>`;
     
     new bootstrap.Modal(document.getElementById("popupResultado")).show();
 
     try {
         const urlPrevisao = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
         
-        // 3. Passamos o { signal } para o fetch. Isso conecta o cancelamento.
+        // 4. Passamos o { signal } para o fetch. Isso conecta o cancelamento.
         const [respRastreio, respRota] = await Promise.all([
             fetch(`/buscar_rastreamento/${placa}`, { signal }),
             fetch(urlPrevisao, { signal })
         ]);
         
+        // CHECKPOINT 1: Se o usuário clicou em outro botão enquanto baixava
+        if (renderToken !== meuToken) return; 
+
         const data = await respRastreio.json();
         const rotaData = await respRota.json();
         
         // Restaura botão original
         previsaoCell.innerHTML = textoOriginal;
+
+        // CHECKPOINT 2: Verificação extra antes de desenhar
+        if (renderToken !== meuToken) return;
 
         let latVeiculo = null, lngVeiculo = null;
         let latDestino = null, lngDestino = null;
@@ -527,7 +549,9 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, button, tipo) 
             document.getElementById("resultadoConteudo").innerHTML = `
             <div class="container-fluid px-3 pt-3">
                 <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light">
-                    <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'}</h5><span class="badge bg-success">Online</span>
+                    <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'}</h5>
+                    <span class="badge bg-success">Online</span>
+                    <span class="badge bg-secondary ms-2 small">ID: ${idLinha}</span>
                 </div>
                 <div class="row g-2 mb-3">
                     <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Origem</small><br><span id="txt-origem" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${enderecoAtual}</span></div></div>
@@ -545,7 +569,8 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, button, tipo) 
             
             if (rotaData.lat) { latDestino = rotaData.lat; lngDestino = rotaData.lng; }
             if (latVeiculo && lngVeiculo) {
-                gerarMapaRota(latVeiculo, lngVeiculo, latDestino, lngDestino, (veiculoData?.endereco || 'Veículo'), localAlvo, rotaData.waypoints_usados, rotaData.todos_pontos_visual, tipo);
+                // Passamos o TOKEN para a função do mapa
+                gerarMapaRota(latVeiculo, lngVeiculo, latDestino, lngDestino, (veiculoData?.endereco || 'Veículo'), localAlvo, rotaData.waypoints_usados, rotaData.todos_pontos_visual, tipo, meuToken);
             } else { 
                 document.getElementById("mapaRota").innerHTML = `<div class="text-center text-muted py-5">Coordenadas indisponíveis.</div>`; 
             }
@@ -553,11 +578,7 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, button, tipo) 
             document.getElementById("resultadoConteudo").innerHTML = `<div class="alert alert-warning m-3 text-dark">Veículo não encontrado.</div>`;
         }
     } catch (err) {
-        // Se foi cancelado pelo usuário (AbortError), não fazemos nada (silêncio)
-        // Se for outro erro real, mostramos
-        if (err.name === 'AbortError') {
-            console.log('Requisição cancelada pelo usuário (troca rápida).');
-        } else {
+        if (err.name !== 'AbortError') {
             previsaoCell.innerHTML = textoOriginal;
             document.getElementById("resultadoConteudo").innerHTML = `<div class='alert alert-danger m-3'>Erro: ${err.message}</div>`;
         }
@@ -789,12 +810,16 @@ function verificarAlertas() {
     }
 }
 
-function gerarMapaRota(latOrigem, lngOrigem, latDestino, lngDestino, nomeOrigem, nomeDestino, waypointsRota, todosPontos = [], tipoDestino) {
+function gerarMapaRota(latOrigem, lngOrigem, latDestino, lngDestino, nomeOrigem, nomeDestino, waypointsRota, todosPontos = [], tipoDestino, tokenSolicitante) {
+    if (tokenSolicitante !== renderToken) return;
+
     const latO = parseFloat(latOrigem) || -23.5505; 
     const lngO = parseFloat(lngOrigem) || -46.6333; 
     const latD = parseFloat(latDestino) || latO; 
     const lngD = parseFloat(lngDestino) || lngO;
-    if (mapaInstancia !== null) { mapaInstancia.remove(); }
+
+    limparMapaSeguro();
+
     try { mapaInstancia = L.map('mapaRota').setView([latO, lngO], 13); } catch (e) { return; }
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(mapaInstancia);
 
@@ -852,6 +877,8 @@ function gerarMapaRota(latOrigem, lngOrigem, latDestino, lngDestino, nomeOrigem,
         }).addTo(mapaInstancia);
     }
 
+    if (tokenSolicitante !== renderToken) return;
+
     routingControlFuture = L.Routing.control({
         waypoints: pointsFuture,
         lineOptions: { styles: [{color: '#0d6efd', opacity: 0.8, weight: 6}] },
@@ -868,6 +895,7 @@ function gerarMapaRota(latOrigem, lngOrigem, latDestino, lngDestino, nomeOrigem,
     }).addTo(mapaInstancia);
 
     routingControlFuture.on('routesfound', function(e) {
+        if (tokenSolicitante !== renderToken) return;
         var routes = e.routes;
         if (routes && routes.length > 0) {
             const rota = routes[0];
@@ -901,12 +929,12 @@ function gerarMapaRota(latOrigem, lngOrigem, latDestino, lngDestino, nomeOrigem,
     routingControlFuture.on('routingerror', function(e) { console.warn("Erro rota:", e); });
 }
 
-async function buscarRastreamento(placa, localfinal, horarioFinalProg, button) {
-    processarBusca(placa, localfinal, horarioFinalProg, button, 'final');
+async function buscarRastreamento(placa, localfinal, horarioFinalProg, idLinha, button) {
+    processarBusca(placa, localfinal, horarioFinalProg, idLinha, button, 'final');
 }
 
-async function buscarRastreamentoinicial(placa, localinicial, horarioFinalProg, button) {
-    processarBusca(placa, localinicial, horarioFinalProg, button, 'inicial'); 
+async function buscarRastreamentoinicial(placa, localinicial, horarioFinalProg, idLinha, button) {
+    processarBusca(placa, localinicial, horarioFinalProg, idLinha, button, 'inicial'); 
 }
 </script>
 </body>
