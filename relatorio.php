@@ -374,4 +374,3 @@ const cellRest = document.getElementById('tempo-rest-' + placa);
 
 </body>
 </html>
-
