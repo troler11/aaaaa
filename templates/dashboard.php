@@ -460,16 +460,16 @@ function limparMapaSeguro() {
 }
 
 // --- FUNÇÃO DE BUSCA OTIMIZADA COM ID DA LINHA ---
+// --- FUNÇÃO DE BUSCA OTIMIZADA COM ID DA LINHA ---
 async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, button, tipo) {
-    // 1. Se existir uma requisição rodando, CANCELA ela imediatamente.
+    // 1. Cancelamento de requisições anteriores
     if (currentController) {
         currentController.abort();
     }
-    // 2. Cria um novo controlador para a requisição atual
     currentController = new AbortController();
     const signal = currentController.signal;
     
-    // 3. Cria Token Único para este clique
+    // 2. Token de renderização
     const meuToken = Date.now();
     renderToken = meuToken;
 
@@ -479,30 +479,29 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
     // Feedback visual
     previsaoCell.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div>';
     
-    limparMapaSeguro(); // Garante tela limpa antes de começar
+    limparMapaSeguro(); 
     document.getElementById("resultadoConteudo").innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div><p class="text-muted fw-bold">Buscando dados...</p><small class="text-muted">Linha ID: ${idLinha}</small></div>`;
     
     new bootstrap.Modal(document.getElementById("popupResultado")).show();
 
     try {
-        const urlPrevisao = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
+        // --- CORREÇÃO AQUI: Adicionamos ?idLinha=... na URL ---
+        const baseUrl = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
+        const urlPrevisao = `${baseUrl}?idLinha=${idLinha}`;
         
-        // 4. Passamos o { signal } para o fetch. Isso conecta o cancelamento.
+        // 3. Executa as requisições em paralelo
         const [respRastreio, respRota] = await Promise.all([
-            fetch(`/buscar_rastreamento/${placa}`, { signal }),
-            fetch(urlPrevisao, { signal })
+            fetch(`/buscar_rastreamento/${placa}`, { signal }), // Rastreamento geralmente é só por placa mesmo
+            fetch(urlPrevisao, { signal }) // Previsão agora leva o ID da linha específica
         ]);
         
-        // CHECKPOINT 1: Se o usuário clicou em outro botão enquanto baixava
         if (renderToken !== meuToken) return; 
 
         const data = await respRastreio.json();
         const rotaData = await respRota.json();
         
-        // Restaura botão original
         previsaoCell.innerHTML = textoOriginal;
 
-        // CHECKPOINT 2: Verificação extra antes de desenhar
         if (renderToken !== meuToken) return;
 
         let latVeiculo = null, lngVeiculo = null;
@@ -510,6 +509,7 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
         let veiculoData = (Array.isArray(data) && data.length > 0) ? data[0] : null;
         
         if (veiculoData) {
+            // Lógica de extração de coordenadas (igual ao anterior)
             if (veiculoData.lat) { latVeiculo = veiculoData.lat; lngVeiculo = veiculoData.lng; }
             else if (veiculoData.loc) { if (typeof veiculoData.loc === 'string') { const p = veiculoData.loc.split(','); latVeiculo = p[0]; lngVeiculo = p[1]; } else if (Array.isArray(veiculoData.loc)) { latVeiculo = veiculoData.loc[0]; lngVeiculo = veiculoData.loc[1]; } }
             
@@ -524,7 +524,7 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
                  horarioEstimado = `${h}:${m}`;
             }
 
-            // Atualiza tabela se ainda estiver na tela
+            // Atualiza células na tabela
             if (tipo === 'final' && horarioEstimado !== '--') {
                 const cell = document.getElementById('prev-fim-' + placa);
                 if (cell) {
@@ -551,7 +551,7 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
                 <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light">
                     <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'}</h5>
                     <span class="badge bg-success">Online</span>
-                    <span class="badge bg-secondary ms-2 small">ID: ${idLinha}</span>
+                    <span class="badge bg-secondary ms-2 small">Rota ID: ${idLinha}</span>
                 </div>
                 <div class="row g-2 mb-3">
                     <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Origem</small><br><span id="txt-origem" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${enderecoAtual}</span></div></div>
@@ -569,7 +569,6 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
             
             if (rotaData.lat) { latDestino = rotaData.lat; lngDestino = rotaData.lng; }
             if (latVeiculo && lngVeiculo) {
-                // Passamos o TOKEN para a função do mapa
                 gerarMapaRota(latVeiculo, lngVeiculo, latDestino, lngDestino, (veiculoData?.endereco || 'Veículo'), localAlvo, rotaData.waypoints_usados, rotaData.todos_pontos_visual, tipo, meuToken);
             } else { 
                 document.getElementById("mapaRota").innerHTML = `<div class="text-center text-muted py-5">Coordenadas indisponíveis.</div>`; 
@@ -584,7 +583,6 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
         }
     }
 }
-
 // ... As outras funções auxiliares (processarEmLotes, etc.) permanecem idênticas ...
 
 async function processarEmLotes(items, limite, callback) {
@@ -739,9 +737,13 @@ async function carregarPrevisoesAutomaticamente() {
         
         if (deveCalcular === 'true') {
             const placa = celula.getAttribute('data-placa');
+            // --- CORREÇÃO: PEGAR O ID DA LINHA ---
+            const idLinha = celula.getAttribute('data-id-linha'); 
+            
             celula.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
             try {
-                const response = await fetch(`/previsao/${placa}`);
+                // --- CORREÇÃO: ENVIAR O ID NA URL ---
+                const response = await fetch(`/previsao/${placa}?idLinha=${idLinha}`);
                 const data = await response.json();
                 if (data.duracaoSegundos) {
                     const agora = new Date();
@@ -939,3 +941,4 @@ async function buscarRastreamentoinicial(placa, localinicial, horarioFinalProg, 
 </script>
 </body>
 </html>
+
