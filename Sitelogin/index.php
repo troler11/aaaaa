@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Telemetria > Supabase (TESTE 10 LINHAS)</title>
+    <title>Telemetria > Supabase (V11 Login Robusto)</title>
     <style>
         body { font-family: monospace; background: #121212; color: #ccc; padding: 20px; }
         .log { border-bottom: 1px solid #333; padding: 4px 0; }
@@ -13,7 +13,7 @@
     </style>
 </head>
 <body>
-<h3>Processamento de Telemetria (V10 - Limite 10 Linhas)</h3>
+<h3>Processamento de Telemetria (V11 - Login GET+POST)</h3>
 <div id="logs"></div>
 
 <script>
@@ -59,13 +59,13 @@ $ABM_USER = "lucas";
 $ABM_PASS = "Lukinha2009";
 $URL_BASE = "https://abmtecnologia.abmprotege.net";
 
-if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') $COOKIE_FILE = sys_get_temp_dir() . '\abm_cookie_test.txt';
-else $COOKIE_FILE = '/tmp/abm_cookie_test.txt';
+if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') $COOKIE_FILE = sys_get_temp_dir() . '\abm_cookie_v11.txt';
+else $COOKIE_FILE = '/tmp/abm_cookie_v11.txt';
 
 $GEO_TOKENS = ["pk.5dec6e778adac747992ee2564e7a57e1", "pk.74da1c80d1fdd103198bb2729dfc24b9"];
 
 // ==========================================================
-// 2. FUNÇÕES
+// 2. FUNÇÕES DE REDE
 // ==========================================================
 
 function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
@@ -78,7 +78,14 @@ function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
     curl_setopt($ch, CURLOPT_TIMEOUT, 30); 
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     
-    $defHeaders = ["User-Agent: Mozilla/5.0", "Accept: application/json"];
+    // Headers para simular navegador real
+    $defHeaders = [
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language: pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control: no-cache",
+        "Upgrade-Insecure-Requests: 1"
+    ];
     curl_setopt($ch, CURLOPT_HTTPHEADER, array_merge($defHeaders, $headers));
 
     if ($method == 'POST') {
@@ -95,22 +102,68 @@ function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
 
 function realizarLogin() {
     global $ABM_USER, $ABM_PASS, $COOKIE_FILE, $URL_BASE;
+    
+    // 1. Limpa cookies antigos
     if (file_exists($COOKIE_FILE)) unlink($COOKIE_FILE);
-    jsLog("🔑 Login...", "inf");
+    
+    // 2. GET INICIAL (Para pegar os cookies de sessão)
+    jsLog("🔑 Acessando página de login (GET)...", "inf");
+    $rGet = curl_req('GET', "$URL_BASE/emp/abmtecnologia", $COOKIE_FILE);
+    
+    // 3. POST LOGIN
+    jsLog("🔑 Enviando credenciais (POST)...", "inf");
     $resp = curl_req('POST', "$URL_BASE/emp/abmtecnologia", $COOKIE_FILE, 
         ["login"=>$ABM_USER, "senha"=>$ABM_PASS, "password"=>$ABM_PASS], 
         ["Content-Type: application/x-www-form-urlencoded", "Origin: $URL_BASE", "Referer: $URL_BASE/emp/abmtecnologia"]
     );
-    if ($resp['code'] != 200 || strpos($resp['url'], "emp/abmtecnologia") !== false) return false;
+
+    // Validação
+    if ($resp['code'] != 200) {
+        jsLog("❌ Erro HTTP: " . $resp['code'], "err");
+        return false;
+    }
+
+    // Se a URL final ainda contém "emp/abmtecnologia", significa que não redirecionou (falhou)
+    if (strpos($resp['url'], "emp/abmtecnologia") !== false) {
+        jsLog("❌ Login recusado pelo servidor.", "err");
+        
+        // DEBUG: Tenta achar mensagem de erro no HTML
+        $html = $resp['body'];
+        $erroMsg = "Desconhecido";
+        // Procura alertas comuns
+        if (strpos($html, "Usuário ou senha inválidos") !== false) $erroMsg = "Usuário/Senha Inválidos";
+        elseif (strpos($html, "alert-danger") !== false) {
+            // Tenta extrair o texto do alert
+            preg_match('/alert-danger[^>]*>(.*?)<\/div>/s', $html, $matches);
+            $erroMsg = isset($matches[1]) ? strip_tags($matches[1]) : "Erro Genérico na tela";
+        }
+        
+        jsLog("⚠️ Motivo provável: " . trim($erroMsg), "warn");
+        return false;
+    }
+
+    jsLog("✅ Login Sucesso! Redirecionado para: " . basename($resp['url']), "suc");
     return true;
 }
 
 function obterTokenOficial() {
     global $COOKIE_FILE, $URL_BASE;
-    jsLog("🔄 Pedindo Token...", "inf");
-    $resp = curl_req('POST', "$URL_BASE/token/Api_ftk4", $COOKIE_FILE, "", ["Content-Length: 0", "Origin: $URL_BASE", "Referer: $URL_BASE/dashboard_controller", "X-Requested-With: XMLHttpRequest"]);
+    jsLog("🔄 Pedindo Token na API...", "inf");
+    
+    // Header específico exigido pelo endpoint de token
+    $headersToken = [
+        "Content-Length: 0", 
+        "Origin: $URL_BASE", 
+        "Referer: $URL_BASE/dashboard_controller", 
+        "X-Requested-With: XMLHttpRequest"
+    ];
+    
+    $resp = curl_req('POST', "$URL_BASE/token/Api_ftk4", $COOKIE_FILE, "", $headersToken);
+    
     $json = json_decode($resp['body'], true);
     if (isset($json['access_token'])) return $json['access_token'];
+    
+    jsLog("⚠️ Falha ao pegar token: " . substr($resp['body'], 0, 100), "err");
     return false;
 }
 
@@ -128,9 +181,11 @@ $dt = new DateTime('yesterday');
 $dtStr = $dt->format('d/m/Y');
 jsLog("📅 Data: $dtStr", "inf");
 
-if (!realizarLogin()) { jsLog("❌ Falha Login", "err"); exit; }
+if (!realizarLogin()) { exit; }
+
 $bearerToken = obterTokenOficial();
 if (!$bearerToken) { jsLog("❌ Falha Token", "err"); exit; }
+jsLog("🎯 Token Obtido!", "suc");
 
 $payload = ['id_cliente'=>'195577', 'id_motorista'=>'0', 'dt_inicial'=>"$dtStr 00:00:00", 'dt_final'=>"$dtStr 23:59:59", 'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'ativo'];
 $headersFT = ["Authorization: Bearer $bearerToken"];
