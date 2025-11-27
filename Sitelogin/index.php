@@ -2,18 +2,18 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Telemetria > Supabase (Token Hunter)</title>
+    <title>Telemetria > Supabase (V7 Fix Login)</title>
     <style>
         body { font-family: monospace; background: #121212; color: #ccc; padding: 20px; }
         .log { border-bottom: 1px solid #333; padding: 4px 0; }
         .err { color: #ff5555; font-weight: bold; }
         .suc { color: #50fa7b; font-weight: bold; }
         .inf { color: #8be9fd; }
-        .token { color: #ffb86c; font-weight: bold; border: 1px dashed #ffb86c; padding: 2px; }
+        .token { color: #ffb86c; border: 1px dashed #444; padding: 2px; }
     </style>
 </head>
 <body>
-<h3>Processamento de Telemetria (V6 - WebSocket Token)</h3>
+<h3>Processamento de Telemetria (V7 - Login Fix)</h3>
 <div id="logs"></div>
 
 <script>
@@ -28,7 +28,7 @@
 </script>
 
 <?php
-// --- CONFIGURAÇÕES DE SERVIDOR ---
+// --- CONFIGURAÇÕES DO SERVIDOR ---
 @apache_setenv('no-gzip', 1); 
 @ini_set('zlib.output_compression', 0);
 @ini_set('implicit_flush', 1); 
@@ -56,15 +56,16 @@ $SB_USER = "postgres.iztzyvygulxlavixngeo";
 $SB_PASS = "Lukinha2009@"; // Senha do banco (não é a chave da API)
 $SB_PORT = "6543";
 
-// -> FULLTRACK
+// -> FULLTRACK / ABM
 $ABM_USER = "lucas";
 $ABM_PASS = "Lukinha2009";
+$URL_BASE = "https://abmtecnologia.abmprotege.net";
 
 // Arquivo Cookie
 if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-    $COOKIE_FILE = sys_get_temp_dir() . '\abm_cookie_ws.txt';
+    $COOKIE_FILE = sys_get_temp_dir() . '\abm_cookie_v7.txt';
 } else {
-    $COOKIE_FILE = '/tmp/abm_cookie_ws.txt';
+    $COOKIE_FILE = '/tmp/abm_cookie_v7.txt';
 }
 
 // Tokens LocationIQ
@@ -80,11 +81,12 @@ function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1); // Segue redirecionamentos (Login -> Mapa)
     curl_setopt($ch, CURLOPT_COOKIEJAR, $cookie);
     curl_setopt($ch, CURLOPT_COOKIEFILE, $cookie);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30); 
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
     
     $defHeaders = [
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
@@ -99,63 +101,77 @@ function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
     
     $res = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
     $err = curl_error($ch);
     curl_close($ch);
-    return [$res, $code, $err];
+    
+    return ['body' => $res, 'code' => $code, 'url' => $finalUrl, 'err' => $err];
 }
 
 /**
- * LÓGICA DE CAÇA AO TOKEN
+ * LÓGICA DE LOGIN COM VALIDAÇÃO DE URL
  */
 function obterTokenFullTrack() {
-    global $ABM_USER, $ABM_PASS, $COOKIE_FILE;
+    global $ABM_USER, $ABM_PASS, $COOKIE_FILE, $URL_BASE;
     
     // 1. Limpa cookies antigos
     if (file_exists($COOKIE_FILE)) unlink($COOKIE_FILE);
     
     jsLog("🔑 Fazendo Login...", "inf");
 
-    // 2. Login
-    list($res, $code, $err) = curl_req('POST', "https://abmtecnologia.abmprotege.net/emp/abmtecnologia", $COOKIE_FILE, 
-        ["login"=>$ABM_USER, "senha"=>$ABM_PASS, "password"=>$ABM_PASS], ["Content-Type: application/x-www-form-urlencoded"]);
+    // Headers Obrigatórios para Login funcionar
+    $loginHeaders = [
+        "Origin: $URL_BASE",
+        "Referer: $URL_BASE/emp/abmtecnologia",
+        "Content-Type: application/x-www-form-urlencoded"
+    ];
 
-    if ($code != 200 || strpos($res, "erro") !== false) {
-        jsLog("❌ Erro Login (HTTP $code).", "err");
+    $resp = curl_req('POST', "$URL_BASE/emp/abmtecnologia", $COOKIE_FILE, 
+        ["login"=>$ABM_USER, "senha"=>$ABM_PASS, "password"=>$ABM_PASS], 
+        $loginHeaders
+    );
+
+    if ($resp['code'] != 200) {
+        jsLog("❌ Erro HTTP Login: " . $resp['code'], "err");
         return false;
     }
 
-    // 3. Acessa Mapa Geral para ler o HTML/JS
-    jsLog("🕵️ Varrendo código fonte do Mapa Geral...", "inf");
-    list($html, $codeMap, $errMap) = curl_req('GET', "https://abmtecnologia.abmprotege.net/mapaGeral", $COOKIE_FILE);
-    
-    $token = "";
+    // VALIDAÇÃO REAL: Verifica se fomos redirecionados para o Mapa ou Dashboard
+    // Se a URL final ainda tiver "emp/abmtecnologia", o login falhou (ficou na mesma página)
+    if (strpos($resp['url'], "emp/abmtecnologia") !== false) {
+        jsLog("❌ Login Falhou (Permaneceu na página de login). Verifique Senha.", "err");
+        return false;
+    }
 
-    // ESTRATÉGIA DE REGEX PARA ENCONTRAR O TOKEN
-    // Procuramos por strings de 40 caracteres hexadecimais (SHA1)
-    
-    // A. Procura por "authToken=" (igual na URL do WebSocket que você achou)
+    jsLog("✅ Login OK! Redirecionado para: " . basename($resp['url']), "suc");
+
+    // 2. Se já estamos no Mapa Geral (pelo redirect), usamos o HTML retornado
+    // Se não, forçamos a ida ao mapa para pegar o token
+    $html = $resp['body'];
+    if (strpos($resp['url'], "mapaGeral") === false) {
+        jsLog("🕵️ Indo para Mapa Geral...", "inf");
+        $rMap = curl_req('GET', "$URL_BASE/mapaGeral", $COOKIE_FILE);
+        $html = $rMap['body'];
+    }
+
+    // 3. CAÇA AO TOKEN
+    $token = "";
     if (preg_match('/authToken\s*[=:]\s*["\']?([a-f0-9]{40})["\']?/i', $html, $matches)) {
         $token = $matches[1];
-        jsLog("🎯 Token achado via 'authToken': $token", "token");
+        jsLog("🎯 Token (authToken): $token", "token");
     }
-    // B. Procura por "token:" ou "token ="
     elseif (preg_match('/token\s*[:=]\s*["\']([a-f0-9]{40})["\']/i', $html, $matches)) {
         $token = $matches[1];
-        jsLog("🎯 Token achado via variável 'token': $token", "token");
+        jsLog("🎯 Token (var token): $token", "token");
     }
-    // C. Procura genérica: qualquer hash de 40 chars que esteja dentro de aspas simples ou duplas
     elseif (preg_match_all('/["\']([a-f0-9]{40})["\']/', $html, $matches)) {
-        // Pega o último encontrado, pois geralmente tokens de sessão aparecem no final dos scripts de config
-        $possiveis = $matches[1];
-        $token = end($possiveis);
-        jsLog("⚠️ Token inferido por padrão (último hash 40 chars): $token", "token");
+        $token = end($matches[1]);
+        jsLog("⚠️ Token inferido: $token", "token");
     }
 
-    if (!empty($token)) {
-        return $token;
-    }
+    if (!empty($token)) return $token;
     
-    jsLog("❌ Token não encontrado no HTML. Verifique se o layout do site mudou.", "err");
+    jsLog("❌ Token não encontrado no HTML.", "err");
     return false;
 }
 
@@ -175,7 +191,10 @@ jsLog("📅 Data: $dtStr", "inf");
 
 // 1. OBTER TOKEN DINÂMICO
 $bearerToken = obterTokenFullTrack();
-if (!$bearerToken) exit;
+if (!$bearerToken) {
+    jsLog("⛔ Processo abortado.", "err");
+    exit;
+}
 
 // 2. API RELATÓRIO
 $payload = [
@@ -186,17 +205,15 @@ $payload = [
 $headersFT = ["Authorization: Bearer $bearerToken"];
 
 jsLog("📡 Baixando Relatório...", "inf");
-list($res, $code, $err) = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, $payload, $headersFT);
+$resp = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, $payload, $headersFT);
 
-if ($code != 200) {
-    jsLog("❌ Erro API ($code).", "err");
-    // Se falhar, tenta usar o cookie como autorização fallback
-    jsLog("⚠️ Tentando fallback sem Bearer...", "warn");
-    list($res, $code, $err) = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, $payload);
-    if ($code != 200) exit;
+if ($resp['code'] != 200) {
+    jsLog("❌ Erro API ($resp[code]).", "err");
+    jsLog("Resp: " . substr($resp['body'], 0, 100), "err");
+    exit;
 }
 
-$json = json_decode($res, true);
+$json = json_decode($resp['body'], true);
 if (!$json) { jsLog("❌ JSON Inválido.", "err"); exit; }
 
 // 3. FLATTEN
