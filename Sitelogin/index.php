@@ -2,18 +2,18 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Telemetria > Supabase (Auto-Token)</title>
+    <title>Telemetria > Supabase (Token Hunter)</title>
     <style>
         body { font-family: monospace; background: #121212; color: #ccc; padding: 20px; }
         .log { border-bottom: 1px solid #333; padding: 4px 0; }
         .err { color: #ff5555; font-weight: bold; }
         .suc { color: #50fa7b; font-weight: bold; }
         .inf { color: #8be9fd; }
-        .token { color: #ffb86c; font-weight: bold; }
+        .token { color: #ffb86c; font-weight: bold; border: 1px dashed #ffb86c; padding: 2px; }
     </style>
 </head>
 <body>
-<h3>Processamento de Telemetria (Token Dinâmico)</h3>
+<h3>Processamento de Telemetria (V6 - WebSocket Token)</h3>
 <div id="logs"></div>
 
 <script>
@@ -28,7 +28,7 @@
 </script>
 
 <?php
-// --- CONFIGURAÇÕES DO SERVIDOR ---
+// --- CONFIGURAÇÕES DE SERVIDOR ---
 @apache_setenv('no-gzip', 1); 
 @ini_set('zlib.output_compression', 0);
 @ini_set('implicit_flush', 1); 
@@ -56,15 +56,15 @@ $SB_USER = "postgres.iztzyvygulxlavixngeo";
 $SB_PASS = "Lukinha2009@"; // Senha do banco (não é a chave da API)
 $SB_PORT = "6543";
 
-// -> FULLTRACK / ABM
+// -> FULLTRACK
 $ABM_USER = "lucas";
 $ABM_PASS = "Lukinha2009";
 
-// Arquivo de Cookie (Essencial)
+// Arquivo Cookie
 if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-    $COOKIE_FILE = sys_get_temp_dir() . '\abm_cookie_auto.txt';
+    $COOKIE_FILE = sys_get_temp_dir() . '\abm_cookie_ws.txt';
 } else {
-    $COOKIE_FILE = '/tmp/abm_cookie_auto.txt';
+    $COOKIE_FILE = '/tmp/abm_cookie_ws.txt';
 }
 
 // Tokens LocationIQ
@@ -73,7 +73,7 @@ $GEO_TOKENS = [
 ];
 
 // ==========================================================
-// 2. FUNÇÕES DE REDE (CURL)
+// 2. FUNÇÕES DE REDE
 // ==========================================================
 
 function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
@@ -85,7 +85,6 @@ function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
     curl_setopt($ch, CURLOPT_COOKIEFILE, $cookie);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30); 
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
     
     $defHeaders = [
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
@@ -106,58 +105,65 @@ function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
 }
 
 /**
- * Faz login e captura o Token Bearer dinamicamente do HTML
+ * LÓGICA DE CAÇA AO TOKEN
  */
-function loginEObterToken() {
+function obterTokenFullTrack() {
     global $ABM_USER, $ABM_PASS, $COOKIE_FILE;
     
-    // 1. Limpa cookie antigo para forçar novo login
+    // 1. Limpa cookies antigos
     if (file_exists($COOKIE_FILE)) unlink($COOKIE_FILE);
     
-    jsLog("🔑 Iniciando Login...", "inf");
+    jsLog("🔑 Fazendo Login...", "inf");
 
-    // 2. Requisição de Login
+    // 2. Login
     list($res, $code, $err) = curl_req('POST', "https://abmtecnologia.abmprotege.net/emp/abmtecnologia", $COOKIE_FILE, 
         ["login"=>$ABM_USER, "senha"=>$ABM_PASS, "password"=>$ABM_PASS], ["Content-Type: application/x-www-form-urlencoded"]);
 
     if ($code != 200 || strpos($res, "erro") !== false) {
-        jsLog("❌ Falha no Login (HTTP $code).", "err");
+        jsLog("❌ Erro Login (HTTP $code).", "err");
         return false;
     }
 
-    // 3. Acessa o Mapa Geral para ler o HTML e achar o token
-    jsLog("🕵️ Capturando token no Mapa Geral...", "inf");
+    // 3. Acessa Mapa Geral para ler o HTML/JS
+    jsLog("🕵️ Varrendo código fonte do Mapa Geral...", "inf");
     list($html, $codeMap, $errMap) = curl_req('GET', "https://abmtecnologia.abmprotege.net/mapaGeral", $COOKIE_FILE);
     
-    // 4. Regex para achar token de 40 caracteres hexadecimais (a20cc...)
-    // Procura por algo como: token = "..." ou 'token': '...'
-    // O padrão [a-f0-9]{40} bate com o token que você mostrou.
     $token = "";
+
+    // ESTRATÉGIA DE REGEX PARA ENCONTRAR O TOKEN
+    // Procuramos por strings de 40 caracteres hexadecimais (SHA1)
     
-    // Tenta achar em variáveis JS comuns
-    if (preg_match('/["\']?token["\']?\s*[:=]\s*["\']([a-f0-9]{40})["\']/i', $html, $matches)) {
+    // A. Procura por "authToken=" (igual na URL do WebSocket que você achou)
+    if (preg_match('/authToken\s*[=:]\s*["\']?([a-f0-9]{40})["\']?/i', $html, $matches)) {
         $token = $matches[1];
-    } 
-    // Tenta achar qualquer string de 40 chars hex que não seja CSS
-    elseif (preg_match('/["\']([a-f0-9]{40})["\']/', $html, $matches)) {
+        jsLog("🎯 Token achado via 'authToken': $token", "token");
+    }
+    // B. Procura por "token:" ou "token ="
+    elseif (preg_match('/token\s*[:=]\s*["\']([a-f0-9]{40})["\']/i', $html, $matches)) {
         $token = $matches[1];
+        jsLog("🎯 Token achado via variável 'token': $token", "token");
+    }
+    // C. Procura genérica: qualquer hash de 40 chars que esteja dentro de aspas simples ou duplas
+    elseif (preg_match_all('/["\']([a-f0-9]{40})["\']/', $html, $matches)) {
+        // Pega o último encontrado, pois geralmente tokens de sessão aparecem no final dos scripts de config
+        $possiveis = $matches[1];
+        $token = end($possiveis);
+        jsLog("⚠️ Token inferido por padrão (último hash 40 chars): $token", "token");
     }
 
     if (!empty($token)) {
-        jsLog("🎯 Token Encontrado: " . substr($token, 0, 10) . "...", "token");
         return $token;
-    } else {
-        jsLog("⚠️ Login OK, mas Token não encontrado no HTML. Tentando usar o cookie como fallback...", "warn");
-        // Em último caso, retornamos null para tentar sem token ou avisar
-        return null;
     }
+    
+    jsLog("❌ Token não encontrado no HTML. Verifique se o layout do site mudou.", "err");
+    return false;
 }
 
 // ==========================================================
 // 3. FLUXO PRINCIPAL
 // ==========================================================
 
-// -> Conexão DB
+// Conexão DB
 try {
     $pdo = new PDO("pgsql:host=$SB_HOST;port=$SB_PORT;dbname=$SB_DB;", $SB_USER, $SB_PASS, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     jsLog("✅ DB Conectado.", "suc");
@@ -167,36 +173,33 @@ $dt = new DateTime('yesterday');
 $dtStr = $dt->format('d/m/Y');
 jsLog("📅 Data: $dtStr", "inf");
 
-// -> 1. LOGIN E CAPTURA DE TOKEN
-$bearerToken = loginEObterToken();
+// 1. OBTER TOKEN DINÂMICO
+$bearerToken = obterTokenFullTrack();
+if (!$bearerToken) exit;
 
-if (!$bearerToken) {
-    jsLog("⛔ Não foi possível obter o token de autorização. O script vai parar.", "err");
-    // Se quiser tentar rodar mesmo sem token (caso a API aceite cookie), comente a linha abaixo:
-    exit; 
-}
-
-// -> 2. CONSULTA API
+// 2. API RELATÓRIO
 $payload = [
     'id_cliente'=>'195577', 'id_motorista'=>'0', 'dt_inicial'=>"$dtStr 00:00:00", 'dt_final'=>"$dtStr 23:59:59",
     'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'ativo'
 ];
 
-// Usa o token capturado
 $headersFT = ["Authorization: Bearer $bearerToken"];
 
 jsLog("📡 Baixando Relatório...", "inf");
 list($res, $code, $err) = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, $payload, $headersFT);
 
 if ($code != 200) {
-    jsLog("❌ Erro API ($code). Resposta: " . substr($res, 0, 100), "err");
-    exit;
+    jsLog("❌ Erro API ($code).", "err");
+    // Se falhar, tenta usar o cookie como autorização fallback
+    jsLog("⚠️ Tentando fallback sem Bearer...", "warn");
+    list($res, $code, $err) = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, $payload);
+    if ($code != 200) exit;
 }
 
 $json = json_decode($res, true);
 if (!$json) { jsLog("❌ JSON Inválido.", "err"); exit; }
 
-// -> 3. PROCESSAMENTO
+// 3. FLATTEN
 $items = [];
 foreach ($json as $i) {
     if (!isset($i['sub_table'])) continue;
@@ -218,9 +221,9 @@ foreach ($json as $i) {
 
 $total = count($items);
 jsLog("📋 Total: $total infrações.", "inf");
-if ($total == 0) exit;
+if ($total == 0) { jsLog("🎉 Sem dados.", "suc"); exit; }
 
-// -> 4. GEO + SAVE (Lotes de 4)
+// 4. PROCESSAMENTO
 $chunks = array_chunk($items, 4);
 $processed = 0;
 
@@ -228,7 +231,7 @@ foreach ($chunks as $batch) {
     $mh = curl_multi_init();
     $handles = [];
     
-    // Check Cache DB
+    // Verifica Cache
     foreach ($batch as $k => $row) {
         $found = false;
         if (isset($pdo)) {
@@ -257,7 +260,7 @@ foreach ($chunks as $batch) {
     
     $running = null; do { curl_multi_exec($mh, $running); } while ($running);
 
-    // Salva Cache e DB
+    // Salva
     foreach ($batch as $k => $row) {
         if (isset($handles[$k])) {
             $ch = $handles[$k];
@@ -296,4 +299,3 @@ jsLog("🎉 Finalizado!", "suc");
 ?>
 </body>
 </html>
-
