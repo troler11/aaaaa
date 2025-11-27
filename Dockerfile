@@ -4,11 +4,14 @@ FROM php:8.2-apache
 RUN apt-get update && apt-get install -y \
     libcurl4-openssl-dev \
     git \
+    libpq-dev \
     unzip \
     && docker-php-ext-install curl session pdo pdo_mysql
 
 # Ativa o módulo de reescrita do Apache
 RUN a2enmod rewrite
+
+RUN docker-php-ext-install pdo pdo_pgsql pgsql
 
 # --- CORREÇÃO DO ERRO 404 ---
 # Configura o Apache para aceitar o arquivo .htaccess na pasta /var/www/html
