@@ -201,7 +201,7 @@ if (!$bearerToken) {
 // PASSO 3: RELATÓRIO
 $payload = [
     'id_cliente'=>'195577', 'id_motorista'=>'0', 'dt_inicial'=>"$dtStr 00:00:00", 'dt_final'=>"$dtStr 23:59:59",
-    'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'motorista'
+    'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'ativo'
 ];
 
 $headersFT = ["Authorization: Bearer $bearerToken"];
@@ -318,3 +318,4 @@ jsLog("🎉 Finalizado!", "suc");
 ?>
 </body>
 </html>
+
