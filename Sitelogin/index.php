@@ -168,7 +168,7 @@ sendLog("📡 Buscando infrações de $dtStr...", "normal");
 if(!file_exists($COOKIE_FILE)) login();
 list($resp, $code) = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, [
     'id_cliente'=>'195577', 'id_motorista'=>'0', 'dt_inicial'=>"$dtStr 00:00:00", 'dt_final'=>"$dtStr 23:59:59",
-    'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'motorista'
+    'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'ativo'
 ], ["Authorization: Bearer a20cc5894d63a3eda08a1866c289b2c9b3ce2222"]);
 
 if ($code != 200) {
@@ -176,7 +176,7 @@ if ($code != 200) {
     login();
     list($resp, $code) = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, [
         'id_cliente'=>'195577', 'id_motorista'=>'0', 'dt_inicial'=>"$dtStr 00:00:00", 'dt_final'=>"$dtStr 23:59:59",
-        'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'motorista'
+        'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'ativo'
     ], ["Authorization: Bearer a20cc5894d63a3eda08a1866c289b2c9b3ce2222"]);
 }
 
@@ -303,4 +303,5 @@ sendLog("✅ Processo finalizado com sucesso!", "db");
 ?>
 </body>
 </html>
+
 
