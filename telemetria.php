@@ -59,10 +59,10 @@
 @apache_setenv('no-gzip', 1); @ini_set('implicit_flush', 1); set_time_limit(0); 
 
 // 1. CONFIGURAÇÕES SUPABASE (PREENCHA AQUI)
-$SB_HOST = "https://mcp.supabase.com/mcp?project_ref=iztzyvygulxlavixngeo"; // Seu Host do Supabase
-$SB_DB   = "postgresql";
+$SB_HOST = "db.xxxxxxxxxxxxxx.supabase.co"; // Seu Host do Supabase
+$SB_DB   = "postgres";
 $SB_USER = "postgres";
-$SB_PASS = "Lukinha2009@"; // Senha do banco (não é a chave da API)
+$SB_PASS = "SuaSenhaDoBanco"; // Senha do banco (não é a chave da API)
 $SB_PORT = "5432";
 
 // 2. CONFIGURAÇÕES FULLTRACK
@@ -176,7 +176,7 @@ if ($code != 200) {
     login();
     list($resp, $code) = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, [
         'id_cliente'=>'195577', 'id_motorista'=>'0', 'dt_inicial'=>"$dtStr 00:00:00", 'dt_final'=>"$dtStr 23:59:59",
-        'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'ativo'
+        'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'motorista'
     ], ["Authorization: Bearer a20cc5894d63a3eda08a1866c289b2c9b3ce2222"]);
 }
 
@@ -299,4 +299,7 @@ foreach ($chunks as $batch) {
 }
 
 sendUpdate("finishProcess();");
-sendLog("✅ Processo finalizado com sucesso!",
+sendLog("✅ Processo finalizado com sucesso!", "db");
+?>
+</body>
+</html>
