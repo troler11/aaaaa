@@ -2,18 +2,18 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Telemetria > Supabase (V7 Fix Login)</title>
+    <title>Telemetria > Supabase (V8 API Token)</title>
     <style>
         body { font-family: monospace; background: #121212; color: #ccc; padding: 20px; }
         .log { border-bottom: 1px solid #333; padding: 4px 0; }
         .err { color: #ff5555; font-weight: bold; }
         .suc { color: #50fa7b; font-weight: bold; }
         .inf { color: #8be9fd; }
-        .token { color: #ffb86c; border: 1px dashed #444; padding: 2px; }
+        .token { color: #ffb86c; border: 1px dashed #555; padding: 2px; }
     </style>
 </head>
 <body>
-<h3>Processamento de Telemetria (V7 - Login Fix)</h3>
+<h3>Processamento de Telemetria (V8 - Endpoint Oficial)</h3>
 <div id="logs"></div>
 
 <script>
@@ -63,9 +63,9 @@ $URL_BASE = "https://abmtecnologia.abmprotege.net";
 
 // Arquivo Cookie
 if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-    $COOKIE_FILE = sys_get_temp_dir() . '\abm_cookie_v7.txt';
+    $COOKIE_FILE = sys_get_temp_dir() . '\abm_cookie_v8.txt';
 } else {
-    $COOKIE_FILE = '/tmp/abm_cookie_v7.txt';
+    $COOKIE_FILE = '/tmp/abm_cookie_v8.txt';
 }
 
 // Tokens LocationIQ
@@ -81,7 +81,7 @@ function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1); // Segue redirecionamentos (Login -> Mapa)
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
     curl_setopt($ch, CURLOPT_COOKIEJAR, $cookie);
     curl_setopt($ch, CURLOPT_COOKIEFILE, $cookie);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30); 
@@ -96,82 +96,80 @@ function curl_req($method, $url, $cookie, $data=null, $headers=[]) {
 
     if ($method == 'POST') {
         curl_setopt($ch, CURLOPT_POST, 1);
-        if ($data) curl_setopt($ch, CURLOPT_POSTFIELDS, is_array($data) ? http_build_query($data) : $data);
+        if ($data !== null) {
+            // Se for array, form-urlencoded, se for string vazia, manda vazia
+            curl_setopt($ch, CURLOPT_POSTFIELDS, is_array($data) ? http_build_query($data) : $data);
+        }
     }
     
     $res = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
     $err = curl_error($ch);
     curl_close($ch);
     
-    return ['body' => $res, 'code' => $code, 'url' => $finalUrl, 'err' => $err];
+    return ['body' => $res, 'code' => $code, 'err' => $err];
 }
 
 /**
- * LÓGICA DE LOGIN COM VALIDAÇÃO DE URL
+ * 1. FAZ LOGIN (Gera o Cookie)
  */
-function obterTokenFullTrack() {
+function realizarLogin() {
     global $ABM_USER, $ABM_PASS, $COOKIE_FILE, $URL_BASE;
-    
-    // 1. Limpa cookies antigos
     if (file_exists($COOKIE_FILE)) unlink($COOKIE_FILE);
     
-    jsLog("🔑 Fazendo Login...", "inf");
-
-    // Headers Obrigatórios para Login funcionar
-    $loginHeaders = [
-        "Origin: $URL_BASE",
-        "Referer: $URL_BASE/emp/abmtecnologia",
-        "Content-Type: application/x-www-form-urlencoded"
-    ];
-
+    jsLog("🔑 Realizando Login...", "inf");
+    
     $resp = curl_req('POST', "$URL_BASE/emp/abmtecnologia", $COOKIE_FILE, 
         ["login"=>$ABM_USER, "senha"=>$ABM_PASS, "password"=>$ABM_PASS], 
-        $loginHeaders
+        ["Content-Type: application/x-www-form-urlencoded", "Origin: $URL_BASE", "Referer: $URL_BASE/emp/abmtecnologia"]
     );
 
     if ($resp['code'] != 200) {
-        jsLog("❌ Erro HTTP Login: " . $resp['code'], "err");
+        jsLog("❌ Login Falhou: HTTP " . $resp['code'], "err");
         return false;
     }
+    return true;
+}
 
-    // VALIDAÇÃO REAL: Verifica se fomos redirecionados para o Mapa ou Dashboard
-    // Se a URL final ainda tiver "emp/abmtecnologia", o login falhou (ficou na mesma página)
-    if (strpos($resp['url'], "emp/abmtecnologia") !== false) {
-        jsLog("❌ Login Falhou (Permaneceu na página de login). Verifique Senha.", "err");
-        return false;
-    }
-
-    jsLog("✅ Login OK! Redirecionado para: " . basename($resp['url']), "suc");
-
-    // 2. Se já estamos no Mapa Geral (pelo redirect), usamos o HTML retornado
-    // Se não, forçamos a ida ao mapa para pegar o token
-    $html = $resp['body'];
-    if (strpos($resp['url'], "mapaGeral") === false) {
-        jsLog("🕵️ Indo para Mapa Geral...", "inf");
-        $rMap = curl_req('GET', "$URL_BASE/mapaGeral", $COOKIE_FILE);
-        $html = $rMap['body'];
-    }
-
-    // 3. CAÇA AO TOKEN
-    $token = "";
-    if (preg_match('/authToken\s*[=:]\s*["\']?([a-f0-9]{40})["\']?/i', $html, $matches)) {
-        $token = $matches[1];
-        jsLog("🎯 Token (authToken): $token", "token");
-    }
-    elseif (preg_match('/token\s*[:=]\s*["\']([a-f0-9]{40})["\']/i', $html, $matches)) {
-        $token = $matches[1];
-        jsLog("🎯 Token (var token): $token", "token");
-    }
-    elseif (preg_match_all('/["\']([a-f0-9]{40})["\']/', $html, $matches)) {
-        $token = end($matches[1]);
-        jsLog("⚠️ Token inferido: $token", "token");
-    }
-
-    if (!empty($token)) return $token;
+/**
+ * 2. CHAMA API OFICIAL DE TOKEN
+ */
+function obterTokenOficial() {
+    global $COOKIE_FILE, $URL_BASE;
     
-    jsLog("❌ Token não encontrado no HTML.", "err");
+    jsLog("🔄 Solicitando Token na API /token/Api_ftk4...", "inf");
+
+    // Headers exatos do seu cURL
+    $headersToken = [
+        "Content-Length: 0", // Importante
+        "Content-Type: application/x-www-form-urlencoded",
+        "Origin: $URL_BASE",
+        "Referer: $URL_BASE/dashboard_controller",
+        "X-Requested-With: XMLHttpRequest"
+    ];
+
+    // POST Vazio, mas com os cookies da sessão
+    $resp = curl_req('POST', "$URL_BASE/token/Api_ftk4", $COOKIE_FILE, "", $headersToken);
+
+    if ($resp['code'] != 200) {
+        jsLog("❌ Erro ao pedir token: HTTP " . $resp['code'], "err");
+        return false;
+    }
+
+    $json = json_decode($resp['body'], true);
+    
+    // O sistema geralmente retorna { "access_token": "..." } ou similar
+    if (isset($json['access_token'])) {
+        $tk = $json['access_token'];
+        jsLog("🎯 Token Obtido: " . substr($tk, 0, 10) . "...", "token");
+        return $tk;
+    } 
+    // Caso retorne direto a string ou outra chave
+    elseif (isset($json['token'])) {
+        return $json['token'];
+    }
+    
+    jsLog("⚠️ Resposta do Token inesperada: " . substr($resp['body'], 0, 100), "err");
     return false;
 }
 
@@ -189,17 +187,21 @@ $dt = new DateTime('yesterday');
 $dtStr = $dt->format('d/m/Y');
 jsLog("📅 Data: $dtStr", "inf");
 
-// 1. OBTER TOKEN DINÂMICO
-$bearerToken = obterTokenFullTrack();
+// PASSO 1: LOGIN
+if (!realizarLogin()) exit;
+
+// PASSO 2: PEGAR TOKEN PELA API OFICIAL
+$bearerToken = obterTokenOficial();
+
 if (!$bearerToken) {
-    jsLog("⛔ Processo abortado.", "err");
+    jsLog("⛔ Não foi possível gerar o token. Abortando.", "err");
     exit;
 }
 
-// 2. API RELATÓRIO
+// PASSO 3: RELATÓRIO
 $payload = [
     'id_cliente'=>'195577', 'id_motorista'=>'0', 'dt_inicial'=>"$dtStr 00:00:00", 'dt_final'=>"$dtStr 23:59:59",
-    'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'ativo'
+    'id_indice'=>'7259', 'id_usuario'=>'250095', 'visualizar_por'=>'motorista'
 ];
 
 $headersFT = ["Authorization: Bearer $bearerToken"];
@@ -208,15 +210,15 @@ jsLog("📡 Baixando Relatório...", "inf");
 $resp = curl_req('POST', "https://api-fulltrack4.fulltrackapp.com/relatorio/DriverBehavior/gerar/", $COOKIE_FILE, $payload, $headersFT);
 
 if ($resp['code'] != 200) {
-    jsLog("❌ Erro API ($resp[code]).", "err");
-    jsLog("Resp: " . substr($resp['body'], 0, 100), "err");
+    jsLog("❌ Erro API Relatório ($resp[code]).", "err");
+    jsLog("Body: " . substr($resp['body'], 0, 200), "err");
     exit;
 }
 
 $json = json_decode($resp['body'], true);
 if (!$json) { jsLog("❌ JSON Inválido.", "err"); exit; }
 
-// 3. FLATTEN
+// PASSO 4: FLATTEN
 $items = [];
 foreach ($json as $i) {
     if (!isset($i['sub_table'])) continue;
@@ -240,7 +242,7 @@ $total = count($items);
 jsLog("📋 Total: $total infrações.", "inf");
 if ($total == 0) { jsLog("🎉 Sem dados.", "suc"); exit; }
 
-// 4. PROCESSAMENTO
+// PASSO 5: PROCESSAMENTO
 $chunks = array_chunk($items, 4);
 $processed = 0;
 
