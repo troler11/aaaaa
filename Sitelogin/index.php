@@ -59,10 +59,10 @@
 @apache_setenv('no-gzip', 1); @ini_set('implicit_flush', 1); set_time_limit(0); 
 
 // 1. CONFIGURAÇÕES SUPABASE (PREENCHA AQUI)
-$SB_HOST = "db.xxxxxxxxxxxxxx.supabase.co"; // Seu Host do Supabase
+$SB_HOST = "https://mcp.supabase.com/mcp?project_ref=iztzyvygulxlavixngeo"; // Seu Host do Supabase
 $SB_DB   = "postgres";
 $SB_USER = "postgres";
-$SB_PASS = "SuaSenhaDoBanco"; // Senha do banco (não é a chave da API)
+$SB_PASS = "Lukinha2009@"; // Senha do banco (não é a chave da API)
 $SB_PORT = "5432";
 
 // 2. CONFIGURAÇÕES FULLTRACK
@@ -303,3 +303,4 @@ sendLog("✅ Processo finalizado com sucesso!", "db");
 ?>
 </body>
 </html>
+
