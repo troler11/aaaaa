@@ -10,7 +10,8 @@ define('TOMTOM_KEYS', [
     "vbdLg3miOthQgBBkTjZyAaj0TmBoyIGv",
     "WquMopwFZcPTeG4s6WkxkzhnMM3w1OGH",
     "ZQx0TqIl2gkDsgF3Yw4G4qwQG6jKp77N",
-    "GK7A9HjGG0cOSN1UqADrkifoN0HExUzy"
+    "GK7A9HjGG0cOSN1UqADrkifoN0HExUzy",
+    "y7k9fPzIQr27uNWDYCZfsS6zX73G25z8"
 ]);
 
 define('COOKIE_FILE', sys_get_temp_dir() . '/cookie_rastreamento_api.txt');
