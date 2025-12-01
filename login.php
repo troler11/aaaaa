@@ -57,7 +57,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - ABM Bus</title>
+    <title>Login - Viação Mimo</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
@@ -104,7 +104,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <div class="card card-login">
     <div class="card-header">
-        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo" class="logo-img">
+        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Logo.png" alt="Logo" class="logo-img">
         <h5 class="text-secondary mt-2">Acesso ao Sistema</h5>
     </div>
     <div class="card-body p-4">
