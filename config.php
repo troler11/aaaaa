@@ -4,10 +4,10 @@ error_reporting(E_ALL & ~E_DEPRECATED);
 date_default_timezone_set('America/Sao_Paulo');
 
 // --- 1. CONFIGURAÇÃO DO BANCO DE DADOS (MySQL) ---
-$host = 'buh4fphw039ad5ndh6gs-mysql.services.clever-cloud.com'; // O Host da Clever Cloud
-$db   = 'buh4fphw039ad5ndh6gs'; // O nome do Database
-$user = 'u1jijym64xbwsqqg'; // O usuário
-$pass = 'WvUiGQXvj7degJoQhtjp';
+$host = 'aws-1-us-east-1.pooler.supabase.com'; // O Host da Clever Cloud
+$db   = 'postgres'; // O nome do Database
+$user = 'postgres.vwnzbfrefhkdkbfxhfhd'; // O usuário
+$pass = 'Lukinha2009@';
 $charset = 'utf8mb4';
 
 $dsn = "mysql:host=$host;dbname=$db;charset=$charset";
