@@ -125,7 +125,7 @@ $usuarios = $pdo->query("SELECT * FROM users ORDER BY full_name ASC")->fetchAll(
 
 <div class="sidebar d-flex flex-column">
     <div class="text-center py-4 bg-dark bg-opacity-25">
-        <h4 class="fw-bold text-white m-0">ABM Bus</h4>
+        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo" style="max-width: 160px;">
         <small class="text-muted">Admin</small>
     </div>
     <a href="/"><i class="bi bi-speedometer2 me-2"></i>Dashboard</a>
