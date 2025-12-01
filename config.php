@@ -10,7 +10,7 @@ $user = 'postgres.vwnzbfrefhkdkbfxhfhd'; // O usuário
 $pass = 'Lukinha2009@';
 $charset = 'utf8mb4';
 
-$dsn = "mysql:host=$host;dbname=$db;charset=$charset";
+$dsn = "pgsql:host=$host;port=$port;dbname=$db";
 $options = [
     PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
@@ -19,9 +19,11 @@ $options = [
 
 try {
     $pdo = new PDO($dsn, $user, $pass, $options);
-    // echo "Conectado com sucesso!";
+    // Para garantir UTF-8 no Postgres:
+    $pdo->exec("SET NAMES 'UTF8'");
 } catch (\PDOException $e) {
-    throw new \PDOException($e->getMessage(), (int)$e->getCode());
+    // É boa prática não exibir o erro detalhado em produção para não vazar credenciais
+    die("Erro de conexão: " . $e->getMessage()); 
 }
 
 // --- 2. CONFIGURAÇÃO DE URLS (ABM Tecnologia) ---
