@@ -9,6 +9,7 @@ $db   = 'postgres'; // O nome do Database
 $user = 'postgres.vwnzbfrefhkdkbfxhfhd'; // O usuário
 $pass = 'Lukinha2009@';
 $charset = 'utf8mb4';
+$port = '6543'; // Porta do Pooler do Supabase (tente 5432 se 6543 falhar)
 
 $dsn = "pgsql:host=$host;port=$port;dbname=$db";
 $options = [
