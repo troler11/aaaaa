@@ -136,7 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </form>
     </div>
     <div class="card-footer text-center py-3 bg-light">
-        <small class="text-muted">&copy; <?php echo date('Y'); ?> Viação Mimo</small>
+        <small class="text-muted">&copy; <?php echo date('Y'); ?> Viação Mimo</small><br>
          <small class="text-muted">Desenvolvido por: Lucas Bueno</small>
     </div>
 </div>
