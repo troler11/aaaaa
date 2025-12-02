@@ -237,61 +237,89 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
         }
 
         // --- PREPARAÇÃO DE DADOS (Movido para cima para permitir filtro de status) ---
-        $prog = $linha['horarioProgramado'] ?? '23:59';
-        $real = $linha['horarioReal'] ?? 'N/D';
-        
-        // --- LÓGICA DE STATUS PARA FILTRO ---
-        $status_calculado = 'aguardando'; // Default
-        
-        if (($linha['categoria'] ?? '') == 'Carro desligado') {
-            $status_calculado = 'desligado';
-        } 
-        elseif ($real == 'N/D' || empty($real)) {
-             $diff = diffMinutosPHP($prog, $hora_atual);
-             if ($diff > 10) {
+       $prog = $linha['horarioProgramado'] ?? '23:59';
+    $real = $linha['horarioReal'] ?? 'N/D';
+    $progFim = $linha['horariofinalProgramado'] ?? 'N/D';
+    
+    // Tenta pegar a estimativa de chegada do cache (se existir)
+    $ts_cache = $linha['previsao_fim_ts'] ?? 0;
+    $estimadoFim = (!empty($ts_cache)) ? date('H:i', $ts_cache) : 'N/D';
+
+    $tolerancia = 10;
+    $status_calculado = 'aguardando'; // Padrão
+    $htmlBadge = ''; // Vamos montar o badge exato aqui também
+
+    // Função auxiliar local para garantir cálculo correto
+    $calcDiff = function($h1, $h2) {
+        if ($h1 == 'N/D' || $h2 == 'N/D') return 0;
+        $t1 = strtotime($h1); $t2 = strtotime($h2);
+        return ($t2 - $t1) / 60; 
+    };
+
+    // 1. CARRO DESLIGADO
+    if (($linha['categoria'] ?? '') == 'Carro desligado') {
+        $status_calculado = 'desligado';
+        $htmlBadge = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
+    }
+    // 2. NÃO INICIOU AINDA (Real é N/D)
+    elseif ($real == 'N/D' || empty($real)) {
+         $diffInicio = $calcDiff($prog, $hora_atual);
+         
+         if ($diffInicio > $tolerancia) {
+             $status_calculado = 'atrasado';
+             $atraso_saida = true; // Flag para linha vermelha se necessário
+             $htmlBadge = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
+         } else {
+             $status_calculado = 'aguardando';
+             $htmlBadge = '<span class="badge bg-light text-dark border">Aguardando</span>';
+         }
+    }
+    // 3. EM MOVIMENTO (Já tem horário Real) - Lógica do seu JS
+    else {
+         $diffSaida   = $calcDiff($prog, $real);
+         $diffChegada = $calcDiff($progFim, $estimadoFim);
+
+         if ($sentido_ida_bool) {
+             // --- LÓGICA IDA ---
+             if ($diffChegada > $tolerancia) {
                  $status_calculado = 'atrasado';
+                 if ($diffSaida > $tolerancia) {
+                     $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
+                 } else {
+                     $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+                 }
              } else {
-                 $status_calculado = 'aguardando';
+                 $status_calculado = 'pontual';
+                 if ($diffSaida < -$tolerancia) {
+                     $htmlBadge = '<span class="badge bg-info text-dark rounded-pill">Pontual (Ini. Adiantado)</span>';
+                 } elseif ($diffSaida > $tolerancia) {
+                     $htmlBadge = '<span class="badge bg-warning text-dark rounded-pill">Pontual (Ini. Atrasado)</span>';
+                 } else {
+                     $htmlBadge = '<span class="badge bg-success rounded-pill">Pontual</span>';
+                 }
              }
-        } 
-        else {
-             $status_calculado = 'pontual';
-        }
+         } else {
+             // --- LÓGICA VOLTA ---
+             if ($diffSaida > $tolerancia) {
+                 $status_calculado = 'atrasado';
+                 $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+             } else {
+                 $status_calculado = 'pontual';
+                 $htmlBadge = '<span class="badge bg-success rounded-pill">Pontual</span>';
+             }
+         }
+    }
 
-        // 3. Filtro de Status (NOVO)
-        if (!empty($filtro_status) && $status_calculado !== $filtro_status) {
-            continue;
-        }
+    // --- FILTRO FINAL DE STATUS ---
+    // Agora o $status_calculado reflete exatamente a cor do badge
+    if (!empty($filtro_status) && $status_calculado !== $filtro_status) {
+        continue;
+    }
 
-        // Se passou pelos filtros, incrementa contador
-        $contador_linhas_exibidas++;
-
-        // --- CONTINUAÇÃO VISUAL ---
-        $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
-        
-        $icon_sentido = $sentido_ida_bool 
-            ? '<i class="bi bi-arrow-right-circle-fill text-primary ms-1" title="IDA"></i>' 
-            : '<i class="bi bi-arrow-left-circle-fill text-warning ms-1" title="VOLTA"></i>';
-
-        // Recria o HTML do badge baseado no cálculo que já fizemos acima
-        $status_html = '';
-        $atraso_saida = false;
-
-        switch($status_calculado) {
-            case 'desligado':
-                $status_html = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
-                break;
-            case 'atrasado':
-                $atraso_saida = true;
-                $status_html = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
-                break;
-            case 'pontual':
-                $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
-                break;
-            default: // aguardando
-                $status_html = '<span class="badge bg-light text-dark border">Aguardando</span>';
-                break;
-        }
+    $contador_linhas_exibidas++;
+    
+    // Variável visual final
+    $status_html = $htmlBadge;
 
         // Adicionando ID da linha no atributo data
         $tr_attr = ($atraso_saida ? 'data-atraso-tipo="saida"' : '') . ' data-sentido-ida="' . $sentido_ida_attr . '" data-id-linha="' . htmlspecialchars($id_linha) . '"';
