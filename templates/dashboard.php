@@ -29,7 +29,6 @@ $lista_empresas_unicas = [];
 
 if (!empty($todas_linhas)) {
     foreach ($todas_linhas as $l) {
-        // Coleta Empresa
         $nome_empresa = $l['empresa']['nome'] ?? '';
         if (!empty($nome_empresa)) {
             $lista_empresas_unicas[$nome_empresa] = $nome_empresa;
@@ -41,7 +40,7 @@ if (!empty($todas_linhas)) {
 // 2. Capturar seleção do usuário via GET
 $filtro_empresa = $_GET['empresa'] ?? '';
 $filtro_sentido = $_GET['sentido'] ?? ''; // 'ida' ou 'volta'
-$filtro_status  = $_GET['status']  ?? ''; // <--- ADICIONE ISSO
+$filtro_status  = $_GET['status']  ?? ''; // 'atrasado', 'pontual', 'aguardando', 'desligado'
 
 // Debug (Opcional)
 $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
@@ -93,7 +92,6 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
         .btn-xs { padding: 0.1rem 0.3rem; font-size: 0.7rem; line-height: 1.0; }
         .blink-animation { animation: blinker 1.5s linear infinite; }
         @keyframes blinker { 50% { opacity: 0.5; } }
-        /* Estilo para a barra de filtros */
         .filter-bar { background-color: #fff; border-radius: 12px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
     </style>
 </head>
@@ -207,27 +205,27 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                     </thead>
                     <tbody id="tabela-veiculos">
     <?php 
-    function diffMinutosPHP($h1, $h2) {
-        if ($h1 == 'N/D' || $h2 == 'N/D') return 0;
+    // Função auxiliar para cálculo de diferença em minutos
+    $calcDiff = function($h1, $h2) {
+        if ($h1 == 'N/D' || $h2 == 'N/D' || empty($h1) || empty($h2)) return 0;
         $t1 = strtotime($h1); $t2 = strtotime($h2);
         return ($t2 - $t1) / 60;
-    }
+    };
 
     $contador_linhas_exibidas = 0;
 
     foreach ($todas_linhas as $linha): 
         
-        // --- EXTRAÇÃO DO ID DA LINHA ---
+        // --- EXTRAÇÃO DE DADOS BÁSICOS ---
         $id_linha = $linha['idLinha'] ?? '';
-
-        // --- FILTRAGEM PHP ---
+        $nome_empresa = $linha['empresa']['nome'] ?? 'N/D';
         
-        // 1. Filtro de Empresa
-        if (!empty($filtro_empresa) && ($linha['empresa']['nome'] ?? '') !== $filtro_empresa) {
+        // --- FILTRO 1: EMPRESA ---
+        if (!empty($filtro_empresa) && $nome_empresa !== $filtro_empresa) {
             continue;
         }
 
-        // 2. Filtro de Sentido
+        // --- FILTRO 2: SENTIDO ---
         $sIdaRaw = $linha['sentidoIDA'] ?? $linha['sentidoIda'] ?? true;
         $sentido_ida_bool = filter_var($sIdaRaw, FILTER_VALIDATE_BOOLEAN);
         $sentido_string = $sentido_ida_bool ? 'ida' : 'volta';
@@ -236,106 +234,101 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
             continue;
         }
 
-        // --- PREPARAÇÃO DE DADOS (Movido para cima para permitir filtro de status) ---
-       $prog = $linha['horarioProgramado'] ?? '23:59';
-    $real = $linha['horarioReal'] ?? 'N/D';
-    $progFim = $linha['horariofinalProgramado'] ?? 'N/D';
-    
-    // Tenta pegar a estimativa de chegada do cache (se existir)
-    $ts_cache = $linha['previsao_fim_ts'] ?? 0;
-    $estimadoFim = (!empty($ts_cache)) ? date('H:i', $ts_cache) : 'N/D';
+        // --- PREPARAÇÃO DE VARIÁVEIS DE TEMPO ---
+        $prog = $linha['horarioProgramado'] ?? '23:59';
+        $real = $linha['horarioReal'] ?? 'N/D';
+        $progFim = $linha['horariofinalProgramado'] ?? 'N/D';
+        
+        $ts_cache = $linha['previsao_fim_ts'] ?? 0;
+        $estimadoFim = (!empty($ts_cache)) ? date('H:i', $ts_cache) : 'N/D';
 
-    $tolerancia = 10;
-    $status_calculado = 'aguardando'; // Padrão
-    $htmlBadge = ''; // Vamos montar o badge exato aqui também
+        // --- LÓGICA DE STATUS (ESPELHANDO JAVASCRIPT) ---
+        $tolerancia = 10;
+        $status_calculado = 'aguardando'; 
+        $htmlBadge = '';
+        $atraso_saida = false;
 
-    // Função auxiliar local para garantir cálculo correto
-    $calcDiff = function($h1, $h2) {
-        if ($h1 == 'N/D' || $h2 == 'N/D') return 0;
-        $t1 = strtotime($h1); $t2 = strtotime($h2);
-        return ($t2 - $t1) / 60; 
-    };
-
-    // 1. CARRO DESLIGADO
-    if (($linha['categoria'] ?? '') == 'Carro desligado') {
-        $status_calculado = 'desligado';
-        $htmlBadge = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
-    }
-    // 2. NÃO INICIOU AINDA (Real é N/D)
-    elseif ($real == 'N/D' || empty($real)) {
-         $diffInicio = $calcDiff($prog, $hora_atual);
-         
-         if ($diffInicio > $tolerancia) {
-             $status_calculado = 'atrasado';
-             $atraso_saida = true; // Flag para linha vermelha se necessário
-             $htmlBadge = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
-         } else {
-             $status_calculado = 'aguardando';
-             $htmlBadge = '<span class="badge bg-light text-dark border">Aguardando</span>';
-         }
-    }
-    // 3. EM MOVIMENTO (Já tem horário Real) - Lógica do seu JS
-    else {
-         $diffSaida   = $calcDiff($prog, $real);
-         $diffChegada = $calcDiff($progFim, $estimadoFim);
-
-         if ($sentido_ida_bool) {
-             // --- LÓGICA IDA ---
-             if ($diffChegada > $tolerancia) {
+        // 1. Desligado
+        if (($linha['categoria'] ?? '') == 'Carro desligado') {
+            $status_calculado = 'desligado';
+            $htmlBadge = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
+        }
+        // 2. Não Iniciou (Aguardando ou Atrasado na Saída)
+        elseif ($real == 'N/D' || empty($real)) {
+             $diffInicio = $calcDiff($prog, $hora_atual);
+             
+             if ($diffInicio > $tolerancia) {
                  $status_calculado = 'atrasado';
-                 if ($diffSaida > $tolerancia) {
-                     $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
+                 $atraso_saida = true;
+                 $htmlBadge = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
+             } else {
+                 $status_calculado = 'aguardando';
+                 $htmlBadge = '<span class="badge bg-light text-dark border">Aguardando</span>';
+             }
+        }
+        // 3. Em Movimento
+        else {
+             $diffSaida   = $calcDiff($prog, $real);
+             $diffChegada = $calcDiff($progFim, $estimadoFim);
+
+             if ($sentido_ida_bool) {
+                 // Lógica IDA
+                 if ($diffChegada > $tolerancia) {
+                     $status_calculado = 'atrasado';
+                     if ($diffSaida > $tolerancia) {
+                         $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
+                     } else {
+                         $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+                     }
                  } else {
-                     $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+                     $status_calculado = 'pontual';
+                     if ($diffSaida < -$tolerancia) {
+                         $htmlBadge = '<span class="badge bg-info text-dark rounded-pill">Pontual (Ini. Adiantado)</span>';
+                     } elseif ($diffSaida > $tolerancia) {
+                         $htmlBadge = '<span class="badge bg-warning text-dark rounded-pill">Pontual (Ini. Atrasado)</span>';
+                     } else {
+                         $htmlBadge = '<span class="badge bg-success rounded-pill">Pontual</span>';
+                     }
                  }
              } else {
-                 $status_calculado = 'pontual';
-                 if ($diffSaida < -$tolerancia) {
-                     $htmlBadge = '<span class="badge bg-info text-dark rounded-pill">Pontual (Ini. Adiantado)</span>';
-                 } elseif ($diffSaida > $tolerancia) {
-                     $htmlBadge = '<span class="badge bg-warning text-dark rounded-pill">Pontual (Ini. Atrasado)</span>';
+                 // Lógica VOLTA
+                 if ($diffSaida > $tolerancia) {
+                     $status_calculado = 'atrasado';
+                     $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
                  } else {
+                     $status_calculado = 'pontual';
                      $htmlBadge = '<span class="badge bg-success rounded-pill">Pontual</span>';
                  }
              }
-         } else {
-             // --- LÓGICA VOLTA ---
-             if ($diffSaida > $tolerancia) {
-                 $status_calculado = 'atrasado';
-                 $htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
-             } else {
-                 $status_calculado = 'pontual';
-                 $htmlBadge = '<span class="badge bg-success rounded-pill">Pontual</span>';
-             }
-         }
-    }
+        }
 
-    // --- FILTRO FINAL DE STATUS ---
-    // Agora o $status_calculado reflete exatamente a cor do badge
-    if (!empty($filtro_status) && $status_calculado !== $filtro_status) {
-        continue;
-    }
+        // --- FILTRO 3: STATUS ---
+        if (!empty($filtro_status) && $status_calculado !== $filtro_status) {
+            continue;
+        }
 
-    $contador_linhas_exibidas++;
-    
-    // Variável visual final
-    $status_html = $htmlBadge;
+        $contador_linhas_exibidas++;
 
-        // Adicionando ID da linha no atributo data
+        // --- RENDERIZAÇÃO ---
+        $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
+        $icon_sentido = $sentido_ida_bool 
+            ? '<i class="bi bi-arrow-right-circle-fill text-primary ms-1" title="IDA"></i>' 
+            : '<i class="bi bi-arrow-left-circle-fill text-warning ms-1" title="VOLTA"></i>';
+
+        // Atributos data para JS
         $tr_attr = ($atraso_saida ? 'data-atraso-tipo="saida"' : '') . ' data-sentido-ida="' . $sentido_ida_attr . '" data-id-linha="' . htmlspecialchars($id_linha) . '"';
         
         $placa_clean = htmlspecialchars($linha['veiculo']['veiculo'] ?? '', ENT_QUOTES);
         $id_prev_fim = "prev-fim-" . $placa_clean;
         $id_prev_ini = "prev-ini-" . $placa_clean;
         $data_placa = $placa_clean;
-        $data_prog_fim = htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES);
+        $data_prog_fim = htmlspecialchars($progFim, ENT_QUOTES);
         
-        $timestamp_cache = $linha['previsao_fim_ts'] ?? ''; 
-        $tem_cache = !empty($timestamp_cache);
+        $tem_cache = !empty($ts_cache);
         $ja_saiu = ($real != 'N/D');
         $deve_calcular = ($ja_saiu && $linha['categoria'] != 'Carro desligado' && !$tem_cache) ? 'true' : 'false';
 
-        $valor_cache = $tem_cache ? date('H:i', $timestamp_cache) : '--:--';
+        $valor_cache = $tem_cache ? date('H:i', $ts_cache) : '--:--';
         
         $classe_prev = "text-muted";
         if ($tem_cache && $data_prog_fim != 'N/D') {
@@ -343,7 +336,7 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
         }
     ?>
         <tr <?php echo $tr_attr; ?>>
-            <td><?php echo htmlspecialchars($linha['empresa']['nome'] ?? 'N/D'); ?></td>
+            <td><?php echo htmlspecialchars($nome_empresa); ?></td>
             <td>
                 <?php echo htmlspecialchars($linha['descricaoLinha'] ?? 'N/D'); ?>
                 <?php echo $icon_sentido; ?>
@@ -351,16 +344,16 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
             <td class="fw-bold text-primary"><?php echo $placa_clean; ?></td>
             <td id="<?php echo $id_prev_ini; ?>" class="text-muted small">--:--</td>
             <td class="<?php echo $atraso_saida ? 'text-danger fw-bold' : ''; ?>">
-                <?php echo htmlspecialchars($linha['horarioProgramado'] ?? 'N/D'); ?>
+                <?php echo htmlspecialchars($prog); ?>
             </td>
-            <td><?php echo htmlspecialchars($linha['horarioReal'] ?? 'N/D'); ?></td>
-            <td><strong><?php echo htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D'); ?></strong></td>
+            <td><?php echo htmlspecialchars($real); ?></td>
+            <td><strong><?php echo htmlspecialchars($progFim); ?></strong></td>
             
              <td id="<?php echo $id_prev_fim; ?>" 
                 class="<?php echo $classe_prev; ?> celula-previsao" 
                 data-placa="<?php echo $data_placa; ?>"
                 data-prog-fim="<?php echo $data_prog_fim; ?>"
-                data-ts-cache="<?php echo $timestamp_cache; ?>" 
+                data-ts-cache="<?php echo $ts_cache; ?>" 
                 data-calcular="<?php echo $deve_calcular; ?>"
                 data-id-linha="<?php echo htmlspecialchars($id_linha); ?>">
                 <?php echo $valor_cache; ?>
@@ -368,7 +361,7 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
 
             <td title="<?php echo htmlspecialchars($linha['ultimaData'] ?? ''); ?>"><?php echo htmlspecialchars($linha['ultimaData'] ?? 'N/D'); ?></td>
             <td>
-                <?php echo $status_html; ?>
+                <?php echo $htmlBadge; ?>
             </td>
              <td class="text-center">
                 <button class="btn btn-outline-primary btn-xs rounded-circle" title="Prev. Inicial"
@@ -527,7 +520,6 @@ function limparMapaSeguro() {
 }
 
 // --- FUNÇÃO DE BUSCA OTIMIZADA COM ID DA LINHA ---
-// --- FUNÇÃO DE BUSCA OTIMIZADA COM ID DA LINHA ---
 async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, button, tipo) {
     // 1. Cancelamento de requisições anteriores
     if (currentController) {
@@ -552,14 +544,13 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
     new bootstrap.Modal(document.getElementById("popupResultado")).show();
 
     try {
-        // --- CORREÇÃO AQUI: Adicionamos ?idLinha=... na URL ---
         const baseUrl = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
         const urlPrevisao = `${baseUrl}?idLinha=${idLinha}`;
         
         // 3. Executa as requisições em paralelo
         const [respRastreio, respRota] = await Promise.all([
-            fetch(`/buscar_rastreamento/${placa}`, { signal }), // Rastreamento geralmente é só por placa mesmo
-            fetch(urlPrevisao, { signal }) // Previsão agora leva o ID da linha específica
+            fetch(`/buscar_rastreamento/${placa}`, { signal }), 
+            fetch(urlPrevisao, { signal }) 
         ]);
         
         if (renderToken !== meuToken) return; 
@@ -576,7 +567,7 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
         let veiculoData = (Array.isArray(data) && data.length > 0) ? data[0] : null;
         
         if (veiculoData) {
-            // Lógica de extração de coordenadas (igual ao anterior)
+            // Lógica de extração de coordenadas
             if (veiculoData.lat) { latVeiculo = veiculoData.lat; lngVeiculo = veiculoData.lng; }
             else if (veiculoData.loc) { if (typeof veiculoData.loc === 'string') { const p = veiculoData.loc.split(','); latVeiculo = p[0]; lngVeiculo = p[1]; } else if (Array.isArray(veiculoData.loc)) { latVeiculo = veiculoData.loc[0]; lngVeiculo = veiculoData.loc[1]; } }
             
@@ -650,7 +641,6 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
         }
     }
 }
-// ... As outras funções auxiliares (processarEmLotes, etc.) permanecem idênticas ...
 
 async function processarEmLotes(items, limite, callback) {
     let index = 0;
@@ -804,12 +794,10 @@ async function carregarPrevisoesAutomaticamente() {
         
         if (deveCalcular === 'true') {
             const placa = celula.getAttribute('data-placa');
-            // --- CORREÇÃO: PEGAR O ID DA LINHA ---
             const idLinha = celula.getAttribute('data-id-linha'); 
             
             celula.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
             try {
-                // --- CORREÇÃO: ENVIAR O ID NA URL ---
                 const response = await fetch(`/previsao/${placa}?idLinha=${idLinha}`);
                 const data = await response.json();
                 if (data.duracaoSegundos) {
