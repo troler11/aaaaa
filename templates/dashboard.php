@@ -41,6 +41,7 @@ if (!empty($todas_linhas)) {
 // 2. Capturar seleção do usuário via GET
 $filtro_empresa = $_GET['empresa'] ?? '';
 $filtro_sentido = $_GET['sentido'] ?? ''; // 'ida' ou 'volta'
+$filtro_status  = $_GET['status']  ?? ''; // <--- ADICIONE ISSO
 
 // Debug (Opcional)
 $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
@@ -135,7 +136,7 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
     <div class="filter-bar">
         <form method="GET" class="row g-2 align-items-center">
             
-            <div class="col-md-5">
+            <div class="col-md-3">
                 <label class="form-label small fw-bold text-secondary mb-1">Empresa:</label>
                 <select name="empresa" class="form-select form-select-sm" onchange="this.form.submit()">
                     <option value="">Todas as Empresas</option>
@@ -147,7 +148,7 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                 </select>
             </div>
 
-            <div class="col-md-5">
+            <div class="col-md-3">
                 <label class="form-label small fw-bold text-secondary mb-1">Sentido:</label>
                 <select name="sentido" class="form-select form-select-sm" onchange="this.form.submit()">
                     <option value="">Todos os Sentidos</option>
@@ -156,7 +157,18 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                 </select>
             </div>
 
-            <?php if (!empty($filtro_empresa) || !empty($filtro_sentido)): ?>
+            <div class="col-md-3">
+                <label class="form-label small fw-bold text-secondary mb-1">Status:</label>
+                <select name="status" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="">Todos os Status</option>
+                    <option value="atrasado"   <?php echo ($filtro_status === 'atrasado')   ? 'selected' : ''; ?>>🔴 Atrasado</option>
+                    <option value="pontual"    <?php echo ($filtro_status === 'pontual')    ? 'selected' : ''; ?>>🟢 Pontual</option>
+                    <option value="aguardando" <?php echo ($filtro_status === 'aguardando') ? 'selected' : ''; ?>>⚪ Aguardando</option>
+                    <option value="desligado"  <?php echo ($filtro_status === 'desligado')  ? 'selected' : ''; ?>>⚫ Desligado</option>
+                </select>
+            </div>
+
+            <?php if (!empty($filtro_empresa) || !empty($filtro_sentido) || !empty($filtro_status)): ?>
             <div class="col-auto align-self-end">
                 <a href="dashboard.php" class="btn btn-outline-danger btn-sm mb-1"><i class="bi bi-x-circle me-1"></i>Limpar</a>
             </div>
@@ -224,34 +236,61 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
             continue;
         }
 
-        $contador_linhas_exibidas++;
-
-        // --- PREPARAÇÃO DE DADOS ---
+        // --- PREPARAÇÃO DE DADOS (Movido para cima para permitir filtro de status) ---
         $prog = $linha['horarioProgramado'] ?? '23:59';
         $real = $linha['horarioReal'] ?? 'N/D';
+        
+        // --- LÓGICA DE STATUS PARA FILTRO ---
+        $status_calculado = 'aguardando'; // Default
+        
+        if (($linha['categoria'] ?? '') == 'Carro desligado') {
+            $status_calculado = 'desligado';
+        } 
+        elseif ($real == 'N/D' || empty($real)) {
+             $diff = diffMinutosPHP($prog, $hora_atual);
+             if ($diff > 10) {
+                 $status_calculado = 'atrasado';
+             } else {
+                 $status_calculado = 'aguardando';
+             }
+        } 
+        else {
+             $status_calculado = 'pontual';
+        }
+
+        // 3. Filtro de Status (NOVO)
+        if (!empty($filtro_status) && $status_calculado !== $filtro_status) {
+            continue;
+        }
+
+        // Se passou pelos filtros, incrementa contador
+        $contador_linhas_exibidas++;
+
+        // --- CONTINUAÇÃO VISUAL ---
         $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
         
         $icon_sentido = $sentido_ida_bool 
             ? '<i class="bi bi-arrow-right-circle-fill text-primary ms-1" title="IDA"></i>' 
             : '<i class="bi bi-arrow-left-circle-fill text-warning ms-1" title="VOLTA"></i>';
 
-        $status_html = '<span class="badge bg-light text-dark border">Aguardando</span>';
+        // Recria o HTML do badge baseado no cálculo que já fizemos acima
+        $status_html = '';
         $atraso_saida = false;
 
-        if (($linha['categoria'] ?? '') == 'Carro desligado') {
-             $status_html = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
-        }
-        elseif ($real == 'N/D' || empty($real)) {
-             $diff = diffMinutosPHP($prog, $hora_atual);
-             if ($diff > 10) {
-                 $atraso_saida = true;
-                 $status_html = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
-             } else {
-                 $status_html = '<span class="badge bg-light text-dark border">Aguardando</span>';
-             }
-        }
-        else {
-             $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
+        switch($status_calculado) {
+            case 'desligado':
+                $status_html = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
+                break;
+            case 'atrasado':
+                $atraso_saida = true;
+                $status_html = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
+                break;
+            case 'pontual':
+                $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
+                break;
+            default: // aguardando
+                $status_html = '<span class="badge bg-light text-dark border">Aguardando</span>';
+                break;
         }
 
         // Adicionando ID da linha no atributo data
