@@ -28,6 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['user_name'] = $user['full_name'];
             $_SESSION['user_role'] = $user['role'];
+            $_SESSION['user_menus'] = $user['allowed_menus']; // Salva o JSON na sessão
 
             if ($user['role'] === 'admin') {
                 $_SESSION['allowed_companies'] = []; 
