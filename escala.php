@@ -389,15 +389,6 @@ $filtro_empresa_sel = $_GET['empresa'] ?? '';
                                             <small class="text-success fw-bold" style="font-size: 0.75rem;">RA: <?php echo $row['ra_val']; ?></small>
                                         <?php endif; ?>
                                     </div>
-
-                                    <i class="bi bi-pencil-square btn-edit-obs ms-2" 
-                                       onclick="editarObs(
-                                           '<?php echo $row['empresa']; ?>', 
-                                           '<?php echo $row['rota']; ?>', 
-                                           '<?php echo addslashes($row['obs']); ?>',
-                                           '<?php echo $data_filtro; ?>' 
-                                       )">
-                                    </i>
                                 </div>
                             </td>
                             <td class="text-center"><?php echo $statusHTML; ?></td>
