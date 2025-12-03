@@ -22,8 +22,8 @@ $sistema_menus = [
     'rotas'      => ['label' => 'Rotas',      'icon' => 'bi-map',          'link' => '#'],
     'veiculos'   => ['label' => 'Veículos',   'icon' => 'bi-bus-front',    'link' => '#'],
     'motoristas' => ['label' => 'Motoristas', 'icon' => 'bi-person-vcard', 'link' => '#'],
-    'relatorios' => ['label' => 'Relatórios', 'icon' => 'bi-file-earmark-text', 'link' => 'relatorio.php'],
     'escala'     => ['label' => 'Escala',     'icon' => 'bi-calendar-week', 'link' => 'escala.php'],
+    'relatorios' => ['label' => 'Relatórios', 'icon' => 'bi-file-earmark-text', 'link' => 'relatorio.php']
 ];
 
 // [NOVO] LISTA DE EMPRESAS DISPONÍVEIS
