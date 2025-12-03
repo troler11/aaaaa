@@ -56,3 +56,29 @@ $HEADERS_COMMON = [
     "Accept: application/json, text/javascript, */*; q=0.01",
     "Accept-Language: pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
 ];
+function verificarPermissaoPagina($menu_necessario) {
+    // 1. Garante que o usuário está logado
+    if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true) {
+        header("Location: login.php");
+        exit;
+    }
+
+    // 2. Se for ADMIN, libera tudo imediatamente
+    if (($_SESSION['user_role'] ?? '') === 'admin') {
+        return true;
+    }
+
+    // 3. Se for USUÁRIO COMUM, verifica se tem a permissão no JSON da sessão
+    $permissoes = json_decode($_SESSION['user_menus'] ?? '[]', true);
+    if (!is_array($permissoes)) {
+        $permissoes = [];
+    }
+
+    // 4. Se a permissão NÃO estiver na lista, chuta para o dashboard
+    if (!in_array($menu_necessario, $permissoes)) {
+        // Opcional: define uma mensagem de erro na sessão
+        $_SESSION['msg_erro'] = "Acesso negado: Você não tem permissão para acessar essa área.";
+        header("Location: /");
+        exit; // IMPORTANTE: o exit para o script aqui
+    }
+}
