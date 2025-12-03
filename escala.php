@@ -93,8 +93,8 @@ function getDadosJson($scriptUrl, $data, $cacheFile, $cacheTime) {
     $idxProg      = $findCol(['ini']); 
     $idxReal      = $findCol(['real', 'realizado']);
     $idxObs       = $findCol(['observação', 'obs']);
-    $idxManut     = $findCol(['manutenção', 'manut']);
-    $idxCarro     = $findCol(['aguardando', 'carro']);
+    $idxManut     = $findCol(['manutenção', 'manut', 'observação']);
+    $idxCarro     = $findCol(['aguardando', 'carro', 'observação']);
     $idxRA        = $findCol(['ra', 'r.a', 'registro']); 
 
     $dadosProcessados = [];
