@@ -6,6 +6,7 @@ if (session_status() === PHP_SESSION_NONE) {
 
 // Carrega configurações e lógica
 require_once 'config.php'; 
+require_once 'menus.php'; 
 require_once 'includes/page_logic.php';
 
 // --- SEGURANÇA ---
@@ -13,6 +14,10 @@ if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true)
     header("Location: login.php");
     exit;
 }
+
+// --- BLOQUEIO DE SEGURANÇA ---
+// O parâmetro 'relatorios' deve ser igual ao que você salvou no banco/array
+verificarPermissaoPagina('dashboard');
 
 // --- CONFIGURAÇÃO ---
 $empresas_permitidas = $_SESSION['allowed_companies'] ?? [];
@@ -143,16 +148,40 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
     <div class="text-center py-4 bg-dark bg-opacity-25 logo-container">
         <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo">
     </div>
-    <a href="#" class="active" title="Dashboard"><i class="bi bi-speedometer2 me-2"></i><span>Dashboard</span></a>
-    <a href="#" title="Rotas"><i class="bi bi-map me-2"></i><span>Rotas</span></a>
-    <a href="#" title="Veículos"><i class="bi bi-bus-front me-2"></i><span>Veículos</span></a>
-    <a href="#" title="Motoristas"><i class="bi bi-person-vcard me-2"></i><span>Motoristas</span></a>
-    <a href="escala.php" title="Escala"><i class="bi bi-person-vcard me-2"></i><span>Escala</span></a>
-    <a href="relatorio.php" title="Relatórios"><i class="bi bi-file-earmark-text me-2"></i><span>Relatórios</span></a>
+
+    <?php 
+    // --- GERAÇÃO DOS LINKS ---
+    foreach ($menu_itens as $chave => $item): 
+        // Lógica de Exibição:
+        // 1. Se for admin: MOSTRA TUDO
+        // 2. Se não for admin: MOSTRA SÓ SE A CHAVE ESTIVER NA LISTA DE PERMISSÕES
+        $is_admin = ($_SESSION['user_role'] ?? '') === 'admin';
+        $tem_permissao = in_array($chave, $permissoes_usuario);
+
+        if ($is_admin || $tem_permissao):
+            // Lógica para marcar o link como "active" (Ex: se o arquivo atual for o link do menu)
+            // No seu exemplo manual, 'Escala' estava fixo como active. Aqui tentamos detectar.
+            // Se preferir fixo, remova essa linha e coloque a classe manualmente na lógica.
+            $classe_active = ($pagina_atual == $item['link'] || ($chave == 'escala' && $pagina_atual == 'escala.php')) ? 'active' : '';
+    ?>
+        <a href="<?php echo $item['link']; ?>" class="<?php echo $classe_active; ?>" title="<?php echo $item['label']; ?>">
+            <i class="bi <?php echo $item['icon']; ?> me-2"></i>
+            <span><?php echo $item['label']; ?></span>
+        </a>
+    <?php 
+        endif; 
+    endforeach; 
+    ?>
+
     <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
-        <a href="admin.php" title="Usuários"><i class="bi bi-people-fill me-2"></i><span>Usuários</span></a>
+        <a href="admin.php" title="Usuários" class="<?php echo ($pagina_atual == 'admin.php') ? 'active' : ''; ?>">
+            <i class="bi bi-people-fill me-2"></i><span>Usuários</span>
+        </a>
     <?php endif; ?>
-    <a href="logout.php" class="mt-auto text-danger border-top border-secondary" title="Sair"><i class="bi bi-box-arrow-right me-2"></i><span>Sair</span></a>
+
+    <a href="logout.php" class="mt-auto text-danger border-top border-secondary" title="Sair">
+        <i class="bi bi-box-arrow-right me-2"></i><span>Sair</span>
+    </a>
 </div>
 
 <div class="content" id="content">
