@@ -23,13 +23,12 @@ $hora_atual = date('H:i');
 $dados_dashboard = handle_index_data($empresas_permitidas);
 extract($dados_dashboard); // Extrai $todas_linhas, $qtd_total, etc.
 
-// --- LÓGICA DE FILTROS (PHP) ---
+// --- LÓGICA DE FILTROS (PHP - Server Side) ---
 // 1. Extrair lista única de Empresas para o Select
 $lista_empresas_unicas = [];
 
 if (!empty($todas_linhas)) {
     foreach ($todas_linhas as $l) {
-        // Coleta Empresa
         $nome_empresa = $l['empresa']['nome'] ?? '';
         if (!empty($nome_empresa)) {
             $lista_empresas_unicas[$nome_empresa] = $nome_empresa;
@@ -60,82 +59,130 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
     <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
 
     <style>
-        body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; }
-        .sidebar { background-color: #0b1f3a; color: white; min-height: 100vh; width: 250px; position: fixed; z-index: 1000; transition: all 0.3s; }
-        .sidebar a { color: #d1d5db; display: block; padding: 14px 20px; text-decoration: none; border-left: 4px solid transparent; font-weight: 500; }
-        .sidebar a.active, .sidebar a:hover { background-color: #1b2e52; color: white; border-left-color: #0d6efd; }
-        .content { margin-left: 250px; padding: 30px; }
-        .card-summary { border-radius: 12px; padding: 20px; color: white; text-align: center; position: relative; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .card-summary h5 { font-size: 0.9rem; opacity: 0.9; margin-bottom: 5px; text-transform: uppercase; }
-        .card-summary h3 { font-size: 2rem; font-weight: 700; margin: 0; }
-        .card-blue { background: linear-gradient(135deg, #0b1f3a 0%, #1e3a8a 100%); }
-        .card-red { background: linear-gradient(135deg, #b91c1c 0%, #dc2626 100%); }
-        .card-green { background: linear-gradient(135deg, #047857 0%, #10b981 100%); }
-        .bg-secondary { background: linear-gradient(135deg, #4b5563 0%, #6b7280 100%) !important; }
-        .bg-info { background: linear-gradient(135deg, #0891b2 0%, #06b6d4 100%) !important; }
-        .bg-warning { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; }
-        .table-responsive { background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 5px; }
-        .table thead { background-color: #f1f5f9; }
-        .table thead th { color: #475569; font-weight: 600; border-bottom: 2px solid #e2e8f0; padding: 15px; cursor: pointer; white-space: nowrap; }
-        .table tbody td { padding: 15px; vertical-align: middle; color: #334155; white-space: normal; }
-        th:hover { background-color: #e2e8f0; color: #0f172a; }
-        .search-bar { border-radius: 20px; border: 1px solid #cbd5e1; padding-left: 40px; height: 45px; }
-        .search-icon { position: absolute; left: 15px; top: 12px; color: #94a3b8; }
-        .modal-content { border: none; border-radius: 16px; overflow: hidden; }
-        #mapaRota { height: 550px; width: 100%; background-color: #e9ecef; z-index: 1; }
-        .leaflet-routing-container { display: none !important; }
-        .mini-loader { width: 1rem; height: 1rem; border-width: 0.15em; }
-        .table-ultra-compact { font-size: 0.9rem; }
-        .table-ultra-compact th, .table-ultra-compact td { padding-top: 2px !important; padding-bottom: 2px !important; padding-left: 4px !important; padding-right: 4px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
-        .col-narrow { width: 1%; white-space: nowrap; }
-        .bi { font-size: 0.9em; }
-        .btn-xs { padding: 0.1rem 0.3rem; font-size: 0.7rem; line-height: 1.0; }
-        .blink-animation { animation: blinker 1.5s linear infinite; }
-        @keyframes blinker { 50% { opacity: 0.5; } }
-        /* Estilo para a barra de filtros */
-        .filter-bar { background-color: #fff; border-radius: 12px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-    </style>
+    body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; overflow-x: hidden; }
+    
+    /* --- SIDEBAR CONFIG --- */
+    .sidebar { 
+        background-color: #0b1f3a; 
+        color: white; 
+        min-height: 100vh; 
+        width: 250px; 
+        position: fixed; 
+        z-index: 1000; 
+        transition: all 0.3s ease; /* Transição suave */
+        overflow-y: auto;
+    }
+
+    /* Estilo dos links */
+    .sidebar a { 
+        color: #d1d5db; 
+        display: flex; /* Flex para alinhar ícone e texto */
+        align-items: center;
+        padding: 14px 20px; 
+        text-decoration: none; 
+        border-left: 4px solid transparent; 
+        font-weight: 500; 
+        white-space: nowrap; /* Impede quebra de texto */
+        overflow: hidden;
+    }
+    .sidebar a i { min-width: 30px; font-size: 1.1rem; } /* Largura fixa para o ícone */
+    .sidebar a.active, .sidebar a:hover { background-color: #1b2e52; color: white; border-left-color: #0d6efd; }
+    
+    /* Imagem do Logo */
+    .sidebar .logo-container img { transition: all 0.3s; max-width: 160px; }
+
+    /* --- ESTADO RETRAÍDO (TOGGLED) --- */
+    .sidebar.toggled { width: 80px; }
+    .sidebar.toggled .logo-container img { max-width: 50px; } /* Diminui logo */
+    .sidebar.toggled a span { display: none; } /* Esconde o texto */
+    .sidebar.toggled a { justify-content: center; padding: 14px 0; } /* Centraliza ícones */
+    .sidebar.toggled a i { margin-right: 0 !important; }
+    
+    /* --- CONTEÚDO --- */
+    .content { 
+        margin-left: 250px; 
+        padding: 30px; 
+        transition: all 0.3s ease; 
+    }
+    .content.toggled { margin-left: 80px; } /* Ajusta margem quando fechado */
+
+    /* Cards e Tabelas (Mantidos do seu código original) */
+    .card-summary { border-radius: 12px; padding: 20px; color: white; text-align: center; position: relative; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .card-summary h5 { font-size: 0.9rem; opacity: 0.9; margin-bottom: 5px; text-transform: uppercase; }
+    .card-summary h3 { font-size: 2rem; font-weight: 700; margin: 0; }
+    .card-blue { background: linear-gradient(135deg, #0b1f3a 0%, #1e3a8a 100%); }
+    .card-red { background: linear-gradient(135deg, #b91c1c 0%, #dc2626 100%); }
+    .card-green { background: linear-gradient(135deg, #047857 0%, #10b981 100%); }
+    .bg-secondary { background: linear-gradient(135deg, #4b5563 0%, #6b7280 100%) !important; }
+    .bg-info { background: linear-gradient(135deg, #0891b2 0%, #06b6d4 100%) !important; }
+    .bg-warning { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; }
+    .table-responsive { background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 5px; }
+    .table thead { background-color: #f1f5f9; }
+    .table thead th { color: #475569; font-weight: 600; border-bottom: 2px solid #e2e8f0; padding: 15px; cursor: pointer; white-space: nowrap; }
+    .table tbody td { padding: 15px; vertical-align: middle; color: #334155; white-space: normal; }
+    th:hover { background-color: #e2e8f0; color: #0f172a; }
+    .search-bar { border-radius: 20px; border: 1px solid #cbd5e1; padding-left: 40px; height: 45px; }
+    .search-icon { position: absolute; left: 15px; top: 12px; color: #94a3b8; }
+    .modal-content { border: none; border-radius: 16px; overflow: hidden; }
+    #mapaRota { height: 550px; width: 100%; background-color: #e9ecef; z-index: 1; }
+    .leaflet-routing-container { display: none !important; }
+    .mini-loader { width: 1rem; height: 1rem; border-width: 0.15em; }
+    .table-ultra-compact { font-size: 0.9rem; }
+    .table-ultra-compact th, .table-ultra-compact td { padding-top: 2px !important; padding-bottom: 2px !important; padding-left: 4px !important; padding-right: 4px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+    .col-narrow { width: 1%; white-space: nowrap; }
+    .bi { font-size: 0.9em; }
+    .btn-xs { padding: 0.1rem 0.3rem; font-size: 0.7rem; line-height: 1.0; }
+    .blink-animation { animation: blinker 1.5s linear infinite; }
+    @keyframes blinker { 50% { opacity: 0.5; } }
+    .filter-bar { background-color: #fff; border-radius: 12px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+</style>
 </head>
 <body>
 
-<div class="sidebar d-flex flex-column">
-    <div class="text-center py-4 bg-dark bg-opacity-25">
-        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo" style="max-width: 160px;">
+<div class="sidebar d-flex flex-column" id="sidebar">
+    <div class="text-center py-4 bg-dark bg-opacity-25 logo-container">
+        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo">
     </div>
-    <a href="#" class="active"><i class="bi bi-speedometer2 me-2"></i>Dashboard</a>
-    <a href="#"><i class="bi bi-map me-2"></i>Rotas</a>
-    <a href="#"><i class="bi bi-bus-front me-2"></i>Veículos</a>
-    <a href="#"><i class="bi bi-person-vcard me-2"></i>Motoristas</a>
-    <a href="relatorio.php"><i class="bi bi-file-earmark-text me-2"></i>Relatórios</a>
+    <a href="#" class="active" title="Dashboard"><i class="bi bi-speedometer2 me-2"></i><span>Dashboard</span></a>
+    <a href="#" title="Rotas"><i class="bi bi-map me-2"></i><span>Rotas</span></a>
+    <a href="#" title="Veículos"><i class="bi bi-bus-front me-2"></i><span>Veículos</span></a>
+    <a href="#" title="Motoristas"><i class="bi bi-person-vcard me-2"></i><span>Motoristas</span></a>
+    <a href="escala.php" title="Escala"><i class="bi bi-person-vcard me-2"></i><span>Escala</span></a>
+    <a href="relatorio.php" title="Relatórios"><i class="bi bi-file-earmark-text me-2"></i><span>Relatórios</span></a>
     <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
-        <a href="admin.php"><i class="bi bi-people-fill me-2"></i>Usuários</a>
+        <a href="admin.php" title="Usuários"><i class="bi bi-people-fill me-2"></i><span>Usuários</span></a>
     <?php endif; ?>
-    <a href="logout.php" class="mt-auto text-danger border-top border-secondary"><i class="bi bi-box-arrow-right me-2"></i>Sair</a>
+    <a href="logout.php" class="mt-auto text-danger border-top border-secondary" title="Sair"><i class="bi bi-box-arrow-right me-2"></i><span>Sair</span></a>
 </div>
 
-<div class="content">
+<div class="content" id="content">
     <div class="d-flex justify-content-between align-items-center mb-4">
-        <div>
-            <h4 class="fw-bold text-dark mb-1">Visão Geral da Frota</h4>
-            <p class="text-muted small mb-0">Monitoramento em tempo real</p>
+        <div class="d-flex align-items-center gap-3">
+            <button class="btn btn-outline-dark border-0 shadow-sm" id="btnToggleMenu">
+                <i class="bi bi-list fs-5"></i>
+            </button>
+            <div>
+                <h4 class="fw-bold text-dark mb-1">Visão Geral da Frota</h4>
+                <p class="text-muted small mb-0">Monitoramento em tempo real</p>
+            </div>
         </div>
+        
         <div class="d-flex gap-2 w-50 justify-content-end">
-          <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
+            <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
             <button class="btn btn-sm btn-dark" onclick="mostrarDebug()">
                 <i class="bi bi-bug"></i> Debug
             </button>
             <?php endif; ?>
             <div class="position-relative w-50">
                 <i class="bi bi-search search-icon"></i>
-                <input type="text" id="searchInput" class="form-control search-bar" placeholder="Buscar na tela...">
+                <input type="text" id="searchInput" class="form-control search-bar" placeholder="Buscar na tela (Texto)...">
             </div>
         </div>
     </div>
 
     <div class="filter-bar">
-        <form method="GET" class="row g-2 align-items-center">
-            
-            <div class="col-md-5">
+        <form method="GET" class="row g-2 align-items-center" id="filterForm">
+            <div class="col-md-3">
                 <label class="form-label small fw-bold text-secondary mb-1">Empresa:</label>
                 <select name="empresa" class="form-select form-select-sm" onchange="this.form.submit()">
                     <option value="">Todas as Empresas</option>
@@ -147,7 +194,7 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                 </select>
             </div>
 
-            <div class="col-md-5">
+            <div class="col-md-3">
                 <label class="form-label small fw-bold text-secondary mb-1">Sentido:</label>
                 <select name="sentido" class="form-select form-select-sm" onchange="this.form.submit()">
                     <option value="">Todos os Sentidos</option>
@@ -156,9 +203,22 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                 </select>
             </div>
 
+            <div class="col-md-4">
+                <label class="form-label small fw-bold text-secondary mb-1">Status (Tempo Real):</label>
+                <select id="filtroStatusJS" class="form-select form-select-sm" onchange="aplicarFiltrosFrontend()">
+                    <option value="">Todos</option>
+                    <option value="atrasado_geral">🚨 Atrasados (Qualquer Tipo)</option>
+                    <option value="atrasado_saida">⚠️ Atraso na Saída (Inicial)</option>
+                    <option value="atrasado_percurso">🛑 Atraso no Percurso (GPS)</option>
+                    <option value="pontual">✅ Pontual</option>
+                    <option value="desligado">🔌 Desligado / Sem Sinal</option>
+                    <option value="aguardando">⏳ Aguardando</option>
+                </select>
+            </div>
+
             <?php if (!empty($filtro_empresa) || !empty($filtro_sentido)): ?>
             <div class="col-auto align-self-end">
-                <a href="dashboard.php" class="btn btn-outline-danger btn-sm mb-1"><i class="bi bi-x-circle me-1"></i>Limpar</a>
+                <a href="/" class="btn btn-outline-danger btn-sm mb-1"><i class="bi bi-x-circle me-1"></i>Limpar</a>
             </div>
             <?php endif; ?>
         </form>
@@ -194,56 +254,62 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                         </tr>
                     </thead>
                     <tbody id="tabela-veiculos">
-    <?php 
-    function diffMinutosPHP($h1, $h2) {
-        if ($h1 == 'N/D' || $h2 == 'N/D') return 0;
-        $t1 = strtotime($h1); $t2 = strtotime($h2);
-        return ($t2 - $t1) / 60;
+  <?php 
+    // --- FUNÇÃO DE CÁLCULO DE TEMPO ---
+    if (!function_exists('diffMinutosPHP')) {
+        function diffMinutosPHP($h_prog, $h_real) {
+            if ($h_prog == 'N/D' || $h_real == 'N/D' || empty($h_prog) || empty($h_real)) return 0;
+            $t_prog = DateTime::createFromFormat('H:i', $h_prog);
+            $t_real = DateTime::createFromFormat('H:i', $h_real);
+            if (!$t_prog || !$t_real) return 0;
+            return ($t_real->getTimestamp() - $t_prog->getTimestamp()) / 60;
+        }
     }
 
     $contador_linhas_exibidas = 0;
 
     foreach ($todas_linhas as $linha): 
         
-        // --- EXTRAÇÃO DO ID DA LINHA ---
         $id_linha = $linha['idLinha'] ?? '';
 
-        // --- FILTRAGEM PHP ---
-        
-        // 1. Filtro de Empresa
-        if (!empty($filtro_empresa) && ($linha['empresa']['nome'] ?? '') !== $filtro_empresa) {
-            continue;
-        }
+        // --- FILTROS ---
+        if (!empty($filtro_empresa) && ($linha['empresa']['nome'] ?? '') !== $filtro_empresa) continue;
 
-        // 2. Filtro de Sentido
         $sIdaRaw = $linha['sentidoIDA'] ?? $linha['sentidoIda'] ?? true;
         $sentido_ida_bool = filter_var($sIdaRaw, FILTER_VALIDATE_BOOLEAN);
         $sentido_string = $sentido_ida_bool ? 'ida' : 'volta';
 
-        if (!empty($filtro_sentido) && $sentido_string !== $filtro_sentido) {
-            continue;
-        }
+        if (!empty($filtro_sentido) && $sentido_string !== $filtro_sentido) continue;
 
         $contador_linhas_exibidas++;
 
         // --- PREPARAÇÃO DE DADOS ---
         $prog = $linha['horarioProgramado'] ?? '23:59';
         $real = $linha['horarioReal'] ?? 'N/D';
-        $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
+        $data_prog_fim = htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES);
         
+        // RECUPERA CACHE
+        $timestamp_cache = $linha['previsao_fim_ts'] ?? ''; 
+        $tem_cache = !empty($timestamp_cache);
+        $valor_cache = $tem_cache ? date('H:i', $timestamp_cache) : '--:--';
+
+        $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
         $icon_sentido = $sentido_ida_bool 
             ? '<i class="bi bi-arrow-right-circle-fill text-primary ms-1" title="IDA"></i>' 
             : '<i class="bi bi-arrow-left-circle-fill text-warning ms-1" title="VOLTA"></i>';
 
-        $status_html = '<span class="badge bg-light text-dark border">Aguardando</span>';
+        // --- LÓGICA DE STATUS COMPLETA (PHP) ---
+        $status_html = '';
         $atraso_saida = false;
+        $tolerancia = 10; // 10 minutos de tolerância
 
         if (($linha['categoria'] ?? '') == 'Carro desligado') {
              $status_html = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
         }
         elseif ($real == 'N/D' || empty($real)) {
+             // 1. AINDA NÃO SAIU
              $diff = diffMinutosPHP($prog, $hora_atual);
-             if ($diff > 10) {
+             if ($diff > $tolerancia) {
                  $atraso_saida = true;
                  $status_html = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
              } else {
@@ -251,24 +317,50 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
              }
         }
         else {
-             $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
+             // 2. JÁ SAIU (EM PERCURSO)
+             $diff_saida = diffMinutosPHP($prog, $real);
+             
+             // Calcula atraso de percurso
+             $atraso_percurso = false;
+
+             // *** ALTERAÇÃO AQUI ***
+             // Adicionado '&& $sentido_ida_bool'. 
+             // Se for VOLTA (false), não calcula atraso de chegada, olhando apenas a saída.
+             if ($sentido_ida_bool && $tem_cache && $data_prog_fim != 'N/D') {
+                 $diff_chegada = diffMinutosPHP($data_prog_fim, $valor_cache);
+                 if ($diff_chegada > $tolerancia) {
+                     $atraso_percurso = true;
+                 }
+             }
+
+             if ($atraso_percurso) {
+                 // Lógica exclusiva para IDA com problemas no trajeto
+                 if ($diff_saida > $tolerancia) {
+                     $status_html = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
+                 } else {
+                     $status_html = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+                 }
+             } elseif ($diff_saida > $tolerancia) {
+                 // Se for VOLTA e atrasou a saída, cai aqui.
+                 // Se for IDA sem previsão de percurso ruim, mas saiu atrasado, cai aqui.
+                 $status_html = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
+             } else {
+                 // Saiu no horário (e se for Ida, previsão de chegada está ok)
+                 $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
+             }
         }
 
-        // Adicionando ID da linha no atributo data
+        // Atributos HTML
         $tr_attr = ($atraso_saida ? 'data-atraso-tipo="saida"' : '') . ' data-sentido-ida="' . $sentido_ida_attr . '" data-id-linha="' . htmlspecialchars($id_linha) . '"';
-        
         $placa_clean = htmlspecialchars($linha['veiculo']['veiculo'] ?? '', ENT_QUOTES);
         $id_prev_fim = "prev-fim-" . $placa_clean;
         $id_prev_ini = "prev-ini-" . $placa_clean;
         $data_placa = $placa_clean;
-        $data_prog_fim = htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES);
         
-        $timestamp_cache = $linha['previsao_fim_ts'] ?? ''; 
-        $tem_cache = !empty($timestamp_cache);
         $ja_saiu = ($real != 'N/D');
+        // Só calcula JS se já saiu, não está desligado, não tem cache E (opcionalmente) se for Ida, dependendo da sua regra de negócio para o front.
+        // Mantive a lógica original aqui, apenas a flag de status mudou.
         $deve_calcular = ($ja_saiu && $linha['categoria'] != 'Carro desligado' && !$tem_cache) ? 'true' : 'false';
-
-        $valor_cache = $tem_cache ? date('H:i', $timestamp_cache) : '--:--';
         
         $classe_prev = "text-muted";
         if ($tem_cache && $data_prog_fim != 'N/D') {
@@ -391,15 +483,11 @@ document.addEventListener("DOMContentLoaded", function() {
         if (mapaInstancia) mapaInstancia.invalidateSize();
     });
 
+    // LISTENER DE BUSCA DE TEXTO
     const searchInput = document.getElementById('searchInput');
     if (searchInput) {
         searchInput.addEventListener('keyup', function() {
-            const termo = this.value.toLowerCase();
-            const linhas = document.querySelectorAll("table tbody tr");
-            linhas.forEach(function(linha) {
-                const textoLinha = linha.textContent.toLowerCase();
-                linha.style.display = textoLinha.includes(termo) ? "" : "none";
-            });
+            aplicarFiltrosFrontend();
         });
     }
 
@@ -409,12 +497,122 @@ document.addEventListener("DOMContentLoaded", function() {
     atualizarCardsResumo(); 
 });
 
+// --- FUNÇÃO UNIFICADA DE FILTROS FRONT-END ---
+function aplicarFiltrosFrontend() {
+    const termoBusca = document.getElementById('searchInput') ? document.getElementById('searchInput').value.toLowerCase() : '';
+    const statusFiltro = document.getElementById('filtroStatusJS') ? document.getElementById('filtroStatusJS').value : '';
+    const linhas = document.querySelectorAll("table tbody tr");
+    
+    // Lista para guardar as células que ficaram visíveis
+    const celulasParaCalcular = [];
+
+    linhas.forEach(function(linha) {
+        // 1. Verificação de Texto (Busca Geral)
+        const textoLinha = linha.textContent.toLowerCase();
+        const matchTexto = textoLinha.includes(termoBusca);
+
+        // 2. Verificação de Status
+        let matchStatus = true;
+        
+        if (statusFiltro !== '') {
+            const celulaStatus = linha.cells[9]; 
+            const textoStatus = celulaStatus ? celulaStatus.innerText.toLowerCase().trim() : '';
+
+            switch (statusFiltro) {
+                case 'atrasado_geral': matchStatus = textoStatus.includes('atrasado'); break;
+                case 'atrasado_saida': matchStatus = textoStatus.includes('(inicial)') || textoStatus.includes('(p. inicial)'); break;
+                case 'atrasado_percurso': matchStatus = textoStatus.includes('(percurso)'); break;
+                case 'pontual': matchStatus = textoStatus.includes('pontual'); break;
+                case 'desligado': matchStatus = textoStatus.includes('desligado'); break;
+                case 'aguardando': matchStatus = textoStatus.includes('aguardando'); break;
+                default: matchStatus = true;
+            }
+        }
+
+        // Exibe apenas se passar nos DOIS filtros
+        if (matchTexto && matchStatus) {
+            linha.style.display = "";
+            
+            // Se a linha está visível, adiciona a célula de previsão à lista de prioridade
+            const celulaPrev = linha.querySelector('.celula-previsao');
+            if (celulaPrev && celulaPrev.innerText.includes('--:--')) {
+                celulasParaCalcular.push(celulaPrev);
+            }
+        } else {
+            linha.style.display = "none";
+        }
+    });
+    
+    // Atualizar contadores visuais
+    atualizarCardsResumo(); 
+    
+    // --- NOVO: Dispara o cálculo APENAS para as linhas filtradas ---
+    if (celulasParaCalcular.length > 0) {
+        carregarPrevisoesAutomaticamente(celulasParaCalcular);
+    }
+}
+
+// --- MODIFICAÇÃO: Função para forçar atualização visual de status baseada no relógio do cliente ---
+function revisarStatusTimeBased() {
+    const linhas = document.querySelectorAll("table tbody tr");
+    const agora = new Date();
+    const horaAtualStr = String(agora.getHours()).padStart(2, '0') + ":" + String(agora.getMinutes()).padStart(2, '0');
+
+    let houveMudanca = false;
+
+    linhas.forEach(row => {
+        // Célula de Status (índice 9)
+        const statusCell = row.cells[9];
+        // Célula de Programação Início (índice 4)
+        const progInicioCell = row.cells[4];
+        // Célula de Real Início (índice 5)
+        const realInicioCell = row.cells[5];
+
+        if (!statusCell || !progInicioCell || !realInicioCell) return;
+
+        const realInicio = realInicioCell.innerText.trim();
+        const progInicio = progInicioCell.innerText.trim();
+        const textoStatus = statusCell.innerText.trim();
+
+        // LÓGICA: Se o veículo NÃO saiu (Real == N/D ou vazio) e NÃO está desligado
+        if ((realInicio === 'N/D' || realInicio === '') && !textoStatus.includes('Desligado')) {
+            
+            // Calcula atraso baseado na hora atual do navegador
+            const diff = calcularDiferencaMinutos(progInicio, horaAtualStr);
+
+            // Se atraso > 10 min e o status atual não é de erro/atraso, atualiza
+            if (diff > 10) {
+                if (!textoStatus.includes('Atrasado')) {
+                    statusCell.innerHTML = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
+                    houveMudanca = true;
+                }
+            } else {
+                // Se ainda está no horário (tolêrancia)
+                if (!textoStatus.includes('Aguardando')) {
+                    statusCell.innerHTML = '<span class="badge bg-light text-dark border">Aguardando</span>';
+                    houveMudanca = true;
+                }
+            }
+        }
+        // Para veículos que JÁ saíram, a função atualizarStatusBadge (via carregarPrevisoes) cuida disso.
+    });
+
+    // Se mudamos algum badge, precisamos re-filtrar a tabela caso o usuário esteja filtrando por status
+    if (houveMudanca) {
+        aplicarFiltrosFrontend();
+        atualizarCardsResumo(); // Atualiza os contadores lá em cima
+    }
+}
+
 function iniciarAtualizacaoAutomatica() {
+    // Roda uma verificação imediata ao carregar
+    revisarStatusTimeBased();
+
     setInterval(async () => {
+        // 1. Atualização via PHP (Server Side)
         try {
             const urlAtual = new URL(window.location.href);
             urlAtual.searchParams.set('t', Date.now());
-            // Adicionado signal para não travar se o usuário navegar
             const controllerAuto = new AbortController();
             const response = await fetch(urlAtual, { signal: controllerAuto.signal });
             const text = await response.text();
@@ -423,15 +621,36 @@ function iniciarAtualizacaoAutomatica() {
 
             const novoTbody = doc.getElementById('tabela-veiculos');
             const tbodyAtual = document.getElementById('tabela-veiculos');
-            if (novoTbody && tbodyAtual && tbodyAtual.innerHTML !== novoTbody.innerHTML) {
-                tbodyAtual.innerHTML = novoTbody.innerHTML;
-                carregarPrevisoesAutomaticamente();
-                atualizarCardsResumo(); 
+
+            if (novoTbody && tbodyAtual) {
+                // Verifica se o conteúdo mudou efetivamente
+                if (tbodyAtual.innerHTML !== novoTbody.innerHTML) {
+                    tbodyAtual.innerHTML = novoTbody.innerHTML;
+                    carregarPrevisoesAutomaticamente();
+                    aplicarFiltrosFrontend();
+                } else {
+                    // SE O HTML NÃO MUDOU (Banco de dados igual):
+                    // Força a verificação de status baseada no tempo local (ex: "Aguardando" -> "Atrasado")
+                    // pois o relógio correu, mesmo que o banco não tenha mudado.
+                    revisarStatusTimeBased();
+                }
             }
         } catch (e) { 
             if (e.name !== 'AbortError') console.error("Erro refresh auto", e); 
         }
-    }, 30000);
+
+        // 2. Garante que as previsões em cache ou tela sejam re-validadas visualmente
+        // Isso ajuda a atualizar a cor do status de "Pontual" para "Atrasado" durante o trajeto
+        const celulasVisiveis = document.querySelectorAll('.celula-previsao:not(:empty)');
+        celulasVisiveis.forEach(celula => {
+             const est = celula.innerText.trim();
+             const progFim = celula.getAttribute('data-prog-fim');
+             if(est !== '--:--' && est !== 'N/D') {
+                 atualizarStatusBadge(celula, est, progFim);
+             }
+        });
+
+    }, 30000); // 30 segundos
 }
     
 const modalElement = document.getElementById('popupResultado');
@@ -459,24 +678,19 @@ function limparMapaSeguro() {
     if(divMapa) divMapa.innerHTML = "";
 }
 
-// --- FUNÇÃO DE BUSCA OTIMIZADA COM ID DA LINHA ---
-// --- FUNÇÃO DE BUSCA OTIMIZADA COM ID DA LINHA ---
 async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, button, tipo) {
-    // 1. Cancelamento de requisições anteriores
     if (currentController) {
         currentController.abort();
     }
     currentController = new AbortController();
     const signal = currentController.signal;
     
-    // 2. Token de renderização
     const meuToken = Date.now();
     renderToken = meuToken;
 
     const previsaoCell = button.closest('td'); 
     const textoOriginal = previsaoCell.innerHTML;
     
-    // Feedback visual
     previsaoCell.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div>';
     
     limparMapaSeguro(); 
@@ -485,14 +699,12 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
     new bootstrap.Modal(document.getElementById("popupResultado")).show();
 
     try {
-        // --- CORREÇÃO AQUI: Adicionamos ?idLinha=... na URL ---
         const baseUrl = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
         const urlPrevisao = `${baseUrl}?idLinha=${idLinha}`;
         
-        // 3. Executa as requisições em paralelo
         const [respRastreio, respRota] = await Promise.all([
-            fetch(`/buscar_rastreamento/${placa}`, { signal }), // Rastreamento geralmente é só por placa mesmo
-            fetch(urlPrevisao, { signal }) // Previsão agora leva o ID da linha específica
+            fetch(`/buscar_rastreamento/${placa}`, { signal }), 
+            fetch(urlPrevisao, { signal }) 
         ]);
         
         if (renderToken !== meuToken) return; 
@@ -509,7 +721,6 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
         let veiculoData = (Array.isArray(data) && data.length > 0) ? data[0] : null;
         
         if (veiculoData) {
-            // Lógica de extração de coordenadas (igual ao anterior)
             if (veiculoData.lat) { latVeiculo = veiculoData.lat; lngVeiculo = veiculoData.lng; }
             else if (veiculoData.loc) { if (typeof veiculoData.loc === 'string') { const p = veiculoData.loc.split(','); latVeiculo = p[0]; lngVeiculo = p[1]; } else if (Array.isArray(veiculoData.loc)) { latVeiculo = veiculoData.loc[0]; lngVeiculo = veiculoData.loc[1]; } }
             
@@ -524,7 +735,6 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
                  horarioEstimado = `${h}:${m}`;
             }
 
-            // Atualiza células na tabela
             if (tipo === 'final' && horarioEstimado !== '--') {
                 const cell = document.getElementById('prev-fim-' + placa);
                 if (cell) {
@@ -583,7 +793,6 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
         }
     }
 }
-// ... As outras funções auxiliares (processarEmLotes, etc.) permanecem idênticas ...
 
 async function processarEmLotes(items, limite, callback) {
     let index = 0;
@@ -684,6 +893,8 @@ function atualizarStatusBadge(celula, horarioEstimado, horarioProgramado) {
             htmlBadge = '<span class="badge bg-light text-dark border">Aguardando</span>';
         }
         statusCell.innerHTML = htmlBadge;
+        // Reaplicar filtros caso o status tenha mudado
+        aplicarFiltrosFrontend();
         return; 
     }
 
@@ -715,15 +926,27 @@ function atualizarStatusBadge(celula, horarioEstimado, horarioProgramado) {
     }
 
     statusCell.innerHTML = htmlBadge;
+    
+    // IMPORTANTE: Reaplicar filtros pois o texto do status mudou
+    aplicarFiltrosFrontend();
 }
 
-async function carregarPrevisoesAutomaticamente() {
-    const celulas = document.querySelectorAll('.celula-previsao');
+async function carregarPrevisoesAutomaticamente(elementosPrioritarios = null) {
+    // Se passarmos elementos específicos (os visíveis), usa eles. Se não, pega todos da tela.
+    const celulas = elementosPrioritarios || document.querySelectorAll('.celula-previsao');
+    
     await processarEmLotes(celulas, 5, async (celula) => {
         const progFim = celula.getAttribute('data-prog-fim');
         const tsCache = celula.getAttribute('data-ts-cache');
         const deveCalcular = celula.getAttribute('data-calcular');
         
+        // Verificação extra: Se já está calculando ou já tem valor (não é --:-- e não é N/D), pula
+        const valorAtual = celula.innerText.trim();
+        const jaCalculando = celula.getAttribute('data-calculando') === 'true';
+        if (jaCalculando || (valorAtual !== '--:--' && valorAtual !== 'N/D' && valorAtual !== 'Erro')) {
+            return;
+        }
+
         if (tsCache) {
             const dateCache = new Date(parseInt(tsCache) * 1000);
             const h = String(dateCache.getHours()).padStart(2, '0');
@@ -737,14 +960,16 @@ async function carregarPrevisoesAutomaticamente() {
         
         if (deveCalcular === 'true') {
             const placa = celula.getAttribute('data-placa');
-            // --- CORREÇÃO: PEGAR O ID DA LINHA ---
             const idLinha = celula.getAttribute('data-id-linha'); 
             
+            // Marca como 'calculando' para evitar dupla requisição
+            celula.setAttribute('data-calculando', 'true');
             celula.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
+            
             try {
-                // --- CORREÇÃO: ENVIAR O ID NA URL ---
                 const response = await fetch(`/previsao/${placa}?idLinha=${idLinha}`);
                 const data = await response.json();
+                
                 if (data.duracaoSegundos) {
                     const agora = new Date();
                     const chegada = new Date(agora.getTime() + data.duracaoSegundos * 1000);
@@ -754,8 +979,15 @@ async function carregarPrevisoesAutomaticamente() {
                     celula.innerText = est;
                     celula.className = (progFim !== 'N/D' && est > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
                     atualizarStatusBadge(celula, est, progFim);
-                } else { celula.innerText = 'N/D'; }
-            } catch (error) { celula.innerText = 'Erro'; }
+                } else { 
+                    celula.innerText = 'N/D'; 
+                }
+            } catch (error) { 
+                celula.innerText = 'Erro'; 
+            } finally {
+                // Remove a marcação independente do resultado
+                celula.removeAttribute('data-calculando');
+            }
         }
     });
 }
@@ -937,6 +1169,24 @@ async function buscarRastreamento(placa, localfinal, horarioFinalProg, idLinha, 
 
 async function buscarRastreamentoinicial(placa, localinicial, horarioFinalProg, idLinha, button) {
     processarBusca(placa, localinicial, horarioFinalProg, idLinha, button, 'inicial'); 
+}
+const btnToggle = document.getElementById('btnToggleMenu');
+const sidebar = document.getElementById('sidebar');
+const content = document.getElementById('content');
+
+if (btnToggle) {
+    btnToggle.addEventListener('click', function() {
+        sidebar.classList.toggle('toggled');
+        content.classList.toggle('toggled');
+
+        // Se o mapa estiver aberto, é necessário avisar o Leaflet que o tamanho da div mudou
+        // para evitar áreas cinzas. Aguardamos a transição do CSS (300ms).
+        setTimeout(() => {
+            if (mapaInstancia) {
+                mapaInstancia.invalidateSize();
+            }
+        }, 350);
+    });
 }
 </script>
 </body>
