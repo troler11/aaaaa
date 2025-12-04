@@ -431,6 +431,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
                         <option value="pendente">Aguardando</option>
                         <option value="confirmado">Confirmado</option>
                         <option value="manutencao">Manutenção</option>
+                        <option value="cobrir">Cobrir</option>
                     </select>
                 </div>
             </form>
@@ -618,31 +619,43 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     }, 1000);
 
     // --- 3. FILTROS DA TABELA ---
-    function aplicarFiltrosJS() {
-        const termo = searchInput.value.toLowerCase();
-        const statusVal = filtroStatus.value;
-        // Pega as linhas NOVAS que acabaram de chegar via AJAX
-        const rows = document.querySelectorAll('#tabela-veiculos tr');
-        let cTotal=0, cConf=0, cPend=0, cManut=0, cAguard=0, cCobrir=0;
+   // --- 3. FILTROS DA TABELA (ATUALIZADO) ---
+function aplicarFiltrosJS() {
+    const termo = searchInput.value.toLowerCase();
+    const statusVal = filtroStatus.value;
+    
+    // Pega as linhas
+    const rows = document.querySelectorAll('#tabela-veiculos tr');
 
-        rows.forEach(row => {
-            const txt = row.innerText.toLowerCase();
-            const st = row.getAttribute('data-status-js');
-            const isManut = row.getAttribute('data-is-manut') === '1';
-            const isAguard = row.getAttribute('data-is-aguard') === '1';
-            const isCobrir = row.getAttribute('data-is-cobrir') === '1';
-            
-            if(txt.includes(termo) && (statusVal === '' || st === statusVal)) {
-                row.style.display = '';
-            } else { 
-                row.style.display = 'none'; 
-            }
-        });
+    rows.forEach(row => {
+        const txt = row.innerText.toLowerCase();
         
-        // Nota: Os KPIs já vêm atualizados do servidor, não precisamos recalcular no JS
-        // a menos que queiramos contar apenas os filtrados na busca.
-        // Se quiser que os KPIs do topo mudem conforme a busca digita, descomente a lógica de contagem aqui.
-    }
+        // Pega os atributos da linha
+        const st = row.getAttribute('data-status-js'); 
+        const isCobrir = row.getAttribute('data-is-cobrir') === '1';
+
+        // Lógica de verificação do status
+        let statusMatch = false;
+
+        if (statusVal === '') {
+            // Se for "Todos", aceita qualquer coisa
+            statusMatch = true;
+        } else if (statusVal === 'cobrir') {
+            // Se o filtro for "Cobrir", verifica apenas a flag de cobrir
+            statusMatch = isCobrir;
+        } else {
+            // Para os outros (pendente, confirmado, manutencao), verifica o status padrão
+            statusMatch = (st === statusVal);
+        }
+        
+        // Aplica o display (precisa bater o texto E o status)
+        if(txt.includes(termo) && statusMatch) {
+            row.style.display = '';
+        } else { 
+            row.style.display = 'none'; 
+        }
+    });
+}
 
     function saveAndApply() {
         localStorage.setItem('mimo_frota_search', searchInput.value);
