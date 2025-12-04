@@ -52,6 +52,117 @@ define('HEADERS_DETALHE_LINHA', [
 /**
  * Verifica autenticação e LIBERA O TRAVAMENTO DA SESSÃO
  */
+
+function distancia_perpendicular($ponto, $linha_inicio, $linha_fim) {
+    // $ponto e $linha... são arrays [lng, lat]
+    $x = $ponto[0]; $y = $ponto[1];
+    $x1 = $linha_inicio[0]; $y1 = $linha_inicio[1];
+    $x2 = $linha_fim[0]; $y2 = $linha_fim[1];
+
+    $A = $x - $x1;
+    $B = $y - $y1;
+    $C = $x2 - $x1;
+    $D = $y2 - $y1;
+
+    $dot = $A * $C + $B * $D;
+    $len_sq = $C * $C + $D * $D;
+    
+    $param = -1;
+    if ($len_sq != 0) { // Evita divisão por zero
+        $param = $dot / $len_sq;
+    }
+
+    $xx = 0; $yy = 0;
+
+    if ($param < 0) {
+        $xx = $x1; $yy = $y1;
+    } elseif ($param > 1) {
+        $xx = $x2; $yy = $y2;
+    } else {
+        $xx = $x1 + $param * $C;
+        $yy = $y1 + $param * $D;
+    }
+
+    $dx = $x - $xx;
+    $dy = $y - $yy;
+    
+    // Retorna distância euclidiana simples (suficiente para esse propósito)
+    return sqrt($dx * $dx + $dy * $dy);
+}
+
+/**
+ * OTIMIZAÇÃO (Etapa 2 - Avançada): Algoritmo Ramer-Douglas-Peucker
+ * Remove pontos redundantes da rota mantendo o formato visual.
+ * * @param array $pointList Lista de coordenadas [[lng, lat], ...]
+ * @param float $epsilon Tolerância (graus). 
+ * 0.00005 (~5m) = Alta qualidade
+ * 0.0001  (~11m) = Equilíbrio (Recomendado)
+ * 0.0002  (~22m) = Alta compressão
+ */
+function simplificar_rota($pointList, $epsilon = 0.0001) {
+    if (count($pointList) < 3) {
+        return $pointList;
+    }
+
+    // Encontra o ponto com a maior distância da reta formada pelo início e fim
+    $dmax = 0;
+    $index = 0;
+    $end = count($pointList) - 1;
+
+    for ($i = 1; $i < $end; $i++) {
+        $d = distancia_perpendicular($pointList[$i], $pointList[0], $pointList[$end]);
+        if ($d > $dmax) {
+            $index = $i;
+            $dmax = $d;
+        }
+    }
+
+    // Se a distância for maior que a tolerância (epsilon), divide e conquista recursivamente
+    if ($dmax > $epsilon) {
+        $recResults1 = simplificar_rota(array_slice($pointList, 0, $index + 1), $epsilon);
+        $recResults2 = simplificar_rota(array_slice($pointList, $index), $epsilon);
+
+        // Junta os resultados (removendo o ponto duplicado da emenda)
+        return array_merge(array_slice($recResults1, 0, -1), $recResults2);
+    } else {
+        // Se todos os pontos intermediários estão perto da reta, descarta eles
+        return [$pointList[0], $pointList[$end]];
+    }
+}
+
+function filtrar_pontos_proximos($coords, $distancia_minima_graus = 0.00005) {
+    if (count($coords) < 2) return $coords;
+
+    $filtrados = [];
+    $filtrados[] = $coords[0]; // Sempre mantém o primeiro
+    $ultimo_ponto = $coords[0];
+
+    // Cálculo simplificado de distância euclidiana (muito mais rápido que Haversine para loops grandes)
+    for ($i = 1; $i < count($coords); $i++) {
+        $atual = $coords[$i];
+        
+        $latDiff = $atual[1] - $ultimo_ponto[1];
+        $lngDiff = $atual[0] - $ultimo_ponto[0];
+        
+        // Teorema de Pitágoras simples: a² + b² = c²
+        $distSq = ($latDiff * $latDiff) + ($lngDiff * $lngDiff);
+
+        // Se a distância ao quadrado for maior que o mínimo ao quadrado, aceita o ponto
+        if ($distSq > ($distancia_minima_graus * $distancia_minima_graus)) {
+            $filtrados[] = $atual;
+            $ultimo_ponto = $atual;
+        }
+    }
+
+    // Sempre tenta manter o último ponto original se ele for diferente do último adicionado
+    $ultimo_original = end($coords);
+    if ($ultimo_ponto !== $ultimo_original) {
+        $filtrados[] = $ultimo_original;
+    }
+
+    return $filtrados;
+}
+
 function verificar_auth_e_liberar() {
     if (session_status() === PHP_SESSION_NONE) {
         session_start();
@@ -533,6 +644,18 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
         $minutos = floor(($segundos % 3600) / 60);
         $tempo_txt = $horas > 0 ? "{$horas}h {$minutos}min" : "{$minutos} min";
 
+        // APLICANDO DOUGLAS-PEUCKER
+        // 0.0001 é aprox 11 metros de tolerância. Ajuste se achar que a linha ficou muito "dura".
+        $rastro_programado_otimizado = simplificar_rota($rastro_programado, 0.0001);
+        $rastro_executado_otimizado = simplificar_rota($rastro_executado, 0.0001);
+
+        // (Opcional) Aplica o arredondamento também para limpar as casas decimais restantes
+        if (function_exists('arredondar_coords')) {
+            $rastro_programado_otimizado = arredondar_coords($rastro_programado_otimizado);
+            $rastro_executado_otimizado = arredondar_coords($rastro_executado_otimizado);
+            $coords_visual               = arredondar_coords($coords_visual);
+        }
+
         responder_json([
             "tempo" => $tempo_txt,
             "distancia" => sprintf("%.2f km", $metros / 1000),
@@ -540,10 +663,14 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
             "lng" => $lon2,
             "duracaoSegundos" => $segundos,
             
-            // --- DADOS DO MAPA ---
-            "rastro_oficial" => $rastro_programado,  // Linha Verde (Programada)
-            "rastro_real" => $rastro_executado,      // Linha Preta (Executada/Mongo) - NOVO CAMPO
-            "waypoints_usados" => $coords_visual,    // Linha Azul (TomTom/Futura)
+            // --- DADOS OTIMIZADOS ---
+            "rastro_oficial" => $rastro_programado_otimizado,
+            "rastro_real"    => $rastro_executado_otimizado,
+            "waypoints_usados" => $coords_visual,             // Azul
+            
+            // Waypoints usados (TomTom) geralmente já são poucos, 
+            // mas podemos arredondar se quiser manter o padrão.
+        
             
             "todos_pontos_visual" => $pontos_mapa,
             "paradas_restantes" => max(0, count($coords_visual) - 2), 
