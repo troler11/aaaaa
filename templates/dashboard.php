@@ -1,146 +1,178 @@
 <?php
-// Verifica se a sessão já existe
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+// --- CONFIGURAÇÃO E SESSÃO ---
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
-// Carrega configurações e lógica
 require_once 'config.php'; 
 require_once 'menus.php'; 
 require_once 'includes/page_logic.php';
 
-// --- SEGURANÇA ---
+// Segurança
 if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true) {
-    header("Location: login.php");
-    exit;
+    header("Location: login.php"); exit;
 }
-
-// --- BLOQUEIO DE SEGURANÇA ---
-// O parâmetro 'relatorios' deve ser igual ao que você salvou no banco/array
 verificarPermissaoPagina('dashboard');
 
-// --- CONFIGURAÇÃO ---
+// Configurações Iniciais
 $empresas_permitidas = $_SESSION['allowed_companies'] ?? [];
 date_default_timezone_set('America/Sao_Paulo'); 
 $hora_atual = date('H:i');
 
-// Carga inicial dos dados
+// Carga de dados (Server Side)
 $dados_dashboard = handle_index_data($empresas_permitidas);
-extract($dados_dashboard); // Extrai $todas_linhas, $qtd_total, etc.
+extract($dados_dashboard); // Disponibiliza $todas_linhas, $qtd_total, etc.
 
-// --- LÓGICA DE FILTROS (PHP - Server Side) ---
-// 1. Extrair lista única de Empresas para o Select
+// Filtros PHP
+$filtro_empresa = $_GET['empresa'] ?? '';
+$filtro_sentido = $_GET['sentido'] ?? '';
+$primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null, JSON_UNESCAPED_UNICODE);
+
+// Lista única de empresas
 $lista_empresas_unicas = [];
-
 if (!empty($todas_linhas)) {
     foreach ($todas_linhas as $l) {
-        $nome_empresa = $l['empresa']['nome'] ?? '';
-        if (!empty($nome_empresa)) {
-            $lista_empresas_unicas[$nome_empresa] = $nome_empresa;
-        }
+        if (!empty($l['empresa']['nome'])) $lista_empresas_unicas[$l['empresa']['nome']] = $l['empresa']['nome'];
     }
-    asort($lista_empresas_unicas); // Ordena alfabeticamente
+    asort($lista_empresas_unicas);
 }
 
-// 2. Capturar seleção do usuário via GET
-$filtro_empresa = $_GET['empresa'] ?? '';
-$filtro_sentido = $_GET['sentido'] ?? ''; // 'ida' ou 'volta'
+// --- FUNÇÃO DE RENDERIZAÇÃO (REUTILIZÁVEL) ---
+// Usada tanto no carregamento inicial quanto no AJAX para economizar processamento
+function renderizar_linhas_tabela($linhas, $filtro_empresa, $filtro_sentido, $hora_atual) {
+    if (empty($linhas)) {
+        echo '<tr><td colspan="12" class="text-center py-4 text-muted">Nenhum veículo encontrado com os filtros selecionados.</td></tr>';
+        return;
+    }
 
-// Debug (Opcional)
-$primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
+    $contador = 0;
+    foreach ($linhas as $linha) {
+        // Filtros PHP
+        if (!empty($filtro_empresa) && ($linha['empresa']['nome'] ?? '') !== $filtro_empresa) continue;
+        
+        $sIdaRaw = $linha['sentidoIDA'] ?? $linha['sentidoIda'] ?? true;
+        $sentido_ida_bool = filter_var($sIdaRaw, FILTER_VALIDATE_BOOLEAN);
+        $sentido_string = $sentido_ida_bool ? 'ida' : 'volta';
+
+        if (!empty($filtro_sentido) && $sentido_string !== $filtro_sentido) continue;
+        
+        $contador++;
+        $id_linha = $linha['idLinha'] ?? '';
+        $prog = $linha['horarioProgramado'] ?? '23:59';
+        $real = $linha['horarioReal'] ?? 'N/D';
+        $data_prog_fim = htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES);
+        
+        // Cache
+        $timestamp_cache = $linha['previsao_fim_ts'] ?? ''; 
+        $tem_cache = !empty($timestamp_cache);
+        $valor_cache = $tem_cache ? date('H:i', $timestamp_cache) : '--:--';
+
+        // Ícones e Atributos
+        $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
+        $icon_sentido = $sentido_ida_bool 
+            ? '<i class="bi bi-arrow-right-circle-fill text-primary ms-1" title="IDA"></i>' 
+            : '<i class="bi bi-arrow-left-circle-fill text-warning ms-1" title="VOLTA"></i>';
+
+        // Lógica de Status (Otimizada)
+        $status_html = '';
+        $atraso_saida = false;
+        $atraso_percurso = false;
+        $tolerancia = 10;
+        
+        // Helper para diff
+        $diffMinutos = function($h1, $h2) {
+            if ($h1 == 'N/D' || $h2 == 'N/D' || empty($h1) || empty($h2)) return 0;
+            $t1 = DateTime::createFromFormat('H:i', $h1); $t2 = DateTime::createFromFormat('H:i', $h2);
+            return ($t1 && $t2) ? ($t2->getTimestamp() - $t1->getTimestamp()) / 60 : 0;
+        };
+
+        if (($linha['categoria'] ?? '') == 'Carro desligado') {
+             $status_html = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
+        } elseif ($real == 'N/D' || empty($real)) {
+             $diff = $diffMinutos($prog, $hora_atual);
+             if ($diff > $tolerancia) {
+                 $atraso_saida = true;
+                 $status_html = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
+             } else {
+                 $status_html = '<span class="badge bg-light text-dark border">Aguardando</span>';
+             }
+        } else {
+             $diff_saida = $diffMinutos($prog, $real);
+             
+             if ($sentido_ida_bool && $tem_cache && $data_prog_fim != 'N/D') {
+                 if ($diffMinutos($data_prog_fim, $valor_cache) > $tolerancia) $atraso_percurso = true;
+             }
+
+             if ($atraso_percurso) {
+                 $status_html = ($diff_saida > $tolerancia) 
+                    ? '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>' 
+                    : '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+             } elseif ($diff_saida > $tolerancia) {
+                 $status_html = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
+             } else {
+                 $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
+             }
+        }
+
+        $tr_attr = ($atraso_saida ? 'data-atraso-tipo="saida"' : '') . ' data-sentido-ida="' . $sentido_ida_attr . '" data-id-linha="' . htmlspecialchars($id_linha) . '"';
+        $placa_clean = htmlspecialchars($linha['veiculo']['veiculo'] ?? '', ENT_QUOTES);
+        $ja_saiu = ($real != 'N/D');
+        $deve_calcular = ($ja_saiu && ($linha['categoria'] ?? '') != 'Carro desligado' && !$tem_cache) ? 'true' : 'false';
+        
+        $classe_prev = "text-muted";
+        if ($tem_cache && $data_prog_fim != 'N/D') {
+             $classe_prev = ($valor_cache > $data_prog_fim) ? "text-danger fw-bold" : "text-success fw-bold";
+        }
+        
+        // Output da Linha
+        echo "<tr $tr_attr>
+            <td>".htmlspecialchars($linha['empresa']['nome'] ?? 'N/D')."</td>
+            <td>".htmlspecialchars($linha['descricaoLinha'] ?? 'N/D')." $icon_sentido</td>
+            <td class='fw-bold text-primary'>$placa_clean</td>
+            <td id='prev-ini-$placa_clean' class='text-muted small'>--:--</td>
+            <td class='".($atraso_saida ? 'text-danger fw-bold' : '')."'>".htmlspecialchars($prog)."</td>
+            <td>".htmlspecialchars($real)."</td>
+            <td><strong>".htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D')."</strong></td>
+            <td id='prev-fim-$placa_clean' class='$classe_prev celula-previsao' 
+                data-placa='$placa_clean' 
+                data-prog-fim='$data_prog_fim' 
+                data-ts-cache='$timestamp_cache' 
+                data-calcular='$deve_calcular' 
+                data-id-linha='".htmlspecialchars($id_linha)."'>$valor_cache</td>
+            <td title='".htmlspecialchars($linha['ultimaData'] ?? '')."'>".htmlspecialchars($linha['ultimaData'] ?? 'N/D')."</td>
+            <td>$status_html</td>
+            <td class='text-center'>
+                <button class='btn btn-outline-primary btn-xs rounded-circle' onclick=\"buscarRastreamentoinicial('$placa_clean', '".htmlspecialchars($linha['localinicial'] ?? 'N/D', ENT_QUOTES)."', '".htmlspecialchars($prog, ENT_QUOTES)."', '".htmlspecialchars($id_linha)."', this)\"><i class='bi bi-clock'></i></button>
+            </td>
+            <td class='text-center'>
+                <button class='btn btn-primary btn-sm rounded-circle shadow-sm' onclick=\"buscarRastreamento('$placa_clean', '".htmlspecialchars($linha['localfinal'] ?? 'N/D', ENT_QUOTES)."', '".htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES)."', '".htmlspecialchars($id_linha)."', this)\"><i class='bi bi-geo-alt-fill'></i></button>
+            </td>
+        </tr>";
+    }
+    
+    if ($contador === 0) {
+        echo '<tr><td colspan="12" class="text-center py-4 text-muted">Nenhum veículo encontrado com os filtros selecionados.</td></tr>';
+    }
+}
+
+// --- AJAX HANDLER (OTIMIZAÇÃO) ---
+// Se a requisição for AJAX pedindo apenas o corpo da tabela, retorna e encerra.
+if (isset($_GET['ajax_tbody'])) {
+    renderizar_linhas_tabela($todas_linhas, $filtro_empresa, $filtro_sentido, $hora_atual);
+    exit; // Encerra o script aqui para não renderizar o HTML completo novamente
+}
 ?>
-
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Viação Mimo - Dashboard</title>
-    
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
-
     <style>
-    body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; overflow-x: hidden; }
-    
-    /* --- SIDEBAR CONFIG --- */
-    .sidebar { 
-        background-color: #0b1f3a; 
-        color: white; 
-        min-height: 100vh; 
-        width: 250px; 
-        position: fixed; 
-        z-index: 1000; 
-        transition: all 0.3s ease; /* Transição suave */
-        overflow-y: auto;
-    }
-
-    /* Estilo dos links */
-    .sidebar a { 
-        color: #d1d5db; 
-        display: flex; /* Flex para alinhar ícone e texto */
-        align-items: center;
-        padding: 14px 20px; 
-        text-decoration: none; 
-        border-left: 4px solid transparent; 
-        font-weight: 500; 
-        white-space: nowrap; /* Impede quebra de texto */
-        overflow: hidden;
-    }
-    .sidebar a i { min-width: 30px; font-size: 1.1rem; } /* Largura fixa para o ícone */
-    .sidebar a.active, .sidebar a:hover { background-color: #1b2e52; color: white; border-left-color: #0d6efd; }
-    
-    /* Imagem do Logo */
-    .sidebar .logo-container img { transition: all 0.3s; max-width: 160px; }
-
-    /* --- ESTADO RETRAÍDO (TOGGLED) --- */
-    .sidebar.toggled { width: 80px; }
-    .sidebar.toggled .logo-container img { max-width: 50px; } /* Diminui logo */
-    .sidebar.toggled a span { display: none; } /* Esconde o texto */
-    .sidebar.toggled a { justify-content: center; padding: 14px 0; } /* Centraliza ícones */
-    .sidebar.toggled a i { margin-right: 0 !important; }
-    
-    /* --- CONTEÚDO --- */
-    .content { 
-        margin-left: 250px; 
-        padding: 30px; 
-        transition: all 0.3s ease; 
-    }
-    .content.toggled { margin-left: 80px; } /* Ajusta margem quando fechado */
-
-    /* Cards e Tabelas (Mantidos do seu código original) */
-    .card-summary { border-radius: 12px; padding: 20px; color: white; text-align: center; position: relative; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-    .card-summary h5 { font-size: 0.9rem; opacity: 0.9; margin-bottom: 5px; text-transform: uppercase; }
-    .card-summary h3 { font-size: 2rem; font-weight: 700; margin: 0; }
-    .card-blue { background: linear-gradient(135deg, #0b1f3a 0%, #1e3a8a 100%); }
-    .card-red { background: linear-gradient(135deg, #b91c1c 0%, #dc2626 100%); }
-    .card-green { background: linear-gradient(135deg, #047857 0%, #10b981 100%); }
-    .bg-secondary { background: linear-gradient(135deg, #4b5563 0%, #6b7280 100%) !important; }
-    .bg-info { background: linear-gradient(135deg, #0891b2 0%, #06b6d4 100%) !important; }
-    .bg-warning { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; }
-    .table-responsive { background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 5px; }
-    .table thead { background-color: #f1f5f9; }
-    .table thead th { color: #475569; font-weight: 600; border-bottom: 2px solid #e2e8f0; padding: 15px; cursor: pointer; white-space: nowrap; }
-    .table tbody td { padding: 15px; vertical-align: middle; color: #334155; white-space: normal; }
-    th:hover { background-color: #e2e8f0; color: #0f172a; }
-    .search-bar { border-radius: 20px; border: 1px solid #cbd5e1; padding-left: 40px; height: 45px; }
-    .search-icon { position: absolute; left: 15px; top: 12px; color: #94a3b8; }
-    .modal-content { border: none; border-radius: 16px; overflow: hidden; }
-    #mapaRota { height: 550px; width: 100%; background-color: #e9ecef; z-index: 1; }
-    .leaflet-routing-container { display: none !important; }
-    .mini-loader { width: 1rem; height: 1rem; border-width: 0.15em; }
-    .table-ultra-compact { font-size: 0.9rem; }
-    .table-ultra-compact th, .table-ultra-compact td { padding-top: 2px !important; padding-bottom: 2px !important; padding-left: 4px !important; padding-right: 4px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
-    .col-narrow { width: 1%; white-space: nowrap; }
-    .bi { font-size: 0.9em; }
-    .btn-xs { padding: 0.1rem 0.3rem; font-size: 0.7rem; line-height: 1.0; }
-    .blink-animation { animation: blinker 1.5s linear infinite; }
-    @keyframes blinker { 50% { opacity: 0.5; } }
-    .filter-bar { background-color: #fff; border-radius: 12px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-</style>
+    body{background-color:#f8f9fa;font-family:'Segoe UI',sans-serif;overflow-x:hidden}.sidebar{background-color:#0b1f3a;color:#fff;min-height:100vh;width:250px;position:fixed;z-index:1000;transition:all .3s ease;overflow-y:auto}.sidebar a{color:#d1d5db;display:flex;align-items:center;padding:14px 20px;text-decoration:none;border-left:4px solid transparent;font-weight:500;white-space:nowrap;overflow:hidden}.sidebar a i{min-width:30px;font-size:1.1rem}.sidebar a.active,.sidebar a:hover{background-color:#1b2e52;color:#fff;border-left-color:#0d6efd}.sidebar .logo-container img{transition:all .3s;max-width:160px}.sidebar.toggled{width:80px}.sidebar.toggled .logo-container img{max-width:50px}.sidebar.toggled a span{display:none}.sidebar.toggled a{justify-content:center;padding:14px 0}.sidebar.toggled a i{margin-right:0!important}.content{margin-left:250px;padding:30px;transition:all .3s ease}.content.toggled{margin-left:80px}.card-summary{border-radius:12px;padding:20px;color:#fff;text-align:center;position:relative;overflow:hidden;box-shadow:0 4px 6px rgba(0,0,0,.1)}.card-summary h5{font-size:.9rem;opacity:.9;margin-bottom:5px;text-transform:uppercase}.card-summary h3{font-size:2rem;font-weight:700;margin:0}.card-blue{background:linear-gradient(135deg,#0b1f3a 0,#1e3a8a 100%)}.card-red{background:linear-gradient(135deg,#b91c1c 0,#dc2626 100%)}.card-green{background:linear-gradient(135deg,#047857 0,#10b981 100%)}.bg-secondary{background:linear-gradient(135deg,#4b5563 0,#6b7280 100%)!important}.bg-info{background:linear-gradient(135deg,#0891b2 0,#06b6d4 100%)!important}.bg-warning{background:linear-gradient(135deg,#f59e0b 0,#d97706 100%)!important}.table-responsive{background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.05);padding:5px}.table thead{background-color:#f1f5f9}.table thead th{color:#475569;font-weight:600;border-bottom:2px solid #e2e8f0;padding:15px;cursor:pointer;white-space:nowrap}.table tbody td{padding:15px;vertical-align:middle;color:#334155;white-space:normal}th:hover{background-color:#e2e8f0;color:#0f172a}.search-bar{border-radius:20px;border:1px solid #cbd5e1;padding-left:40px;height:45px}.search-icon{position:absolute;left:15px;top:12px;color:#94a3b8}.modal-content{border:none;border-radius:16px;overflow:hidden}#mapaRota{height:550px;width:100%;background-color:#e9ecef;z-index:1}.leaflet-routing-container{display:none!important}.mini-loader{width:1rem;height:1rem;border-width:.15em}.table-ultra-compact{font-size:.9rem}.table-ultra-compact td,.table-ultra-compact th{padding-top:2px!important;padding-bottom:2px!important;padding-left:4px!important;padding-right:4px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}.col-narrow{width:1%;white-space:nowrap}.bi{font-size:.9em}.btn-xs{padding:.1rem .3rem;font-size:.7rem;line-height:1}.blink-animation{animation:blinker 1.5s linear infinite}@keyframes blinker{50%{opacity:.5}}.filter-bar{background-color:#fff;border-radius:12px;padding:15px;margin-bottom:20px;box-shadow:0 2px 5px rgba(0,0,0,.05)}
+    </style>
 </head>
 <body>
 
@@ -148,37 +180,22 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
     <div class="text-center py-4 bg-dark bg-opacity-25 logo-container">
         <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo">
     </div>
-
     <?php 
-    // --- GERAÇÃO DOS LINKS ---
     foreach ($menu_itens as $chave => $item): 
-        // Lógica de Exibição:
-        // 1. Se for admin: MOSTRA TUDO
-        // 2. Se não for admin: MOSTRA SÓ SE A CHAVE ESTIVER NA LISTA DE PERMISSÕES
         $is_admin = ($_SESSION['user_role'] ?? '') === 'admin';
         $tem_permissao = in_array($chave, $permissoes_usuario);
-
         if ($is_admin || $tem_permissao):
-            // Lógica para marcar o link como "active" (Ex: se o arquivo atual for o link do menu)
-            // No seu exemplo manual, 'Escala' estava fixo como active. Aqui tentamos detectar.
-            // Se preferir fixo, remova essa linha e coloque a classe manualmente na lógica.
             $classe_active = ($pagina_atual == $item['link'] || ($chave == 'escala' && $pagina_atual == 'escala.php')) ? 'active' : '';
     ?>
         <a href="<?php echo $item['link']; ?>" class="<?php echo $classe_active; ?>" title="<?php echo $item['label']; ?>">
-            <i class="bi <?php echo $item['icon']; ?> me-2"></i>
-            <span><?php echo $item['label']; ?></span>
+            <i class="bi <?php echo $item['icon']; ?> me-2"></i><span><?php echo $item['label']; ?></span>
         </a>
-    <?php 
-        endif; 
-    endforeach; 
-    ?>
-
+    <?php endif; endforeach; ?>
     <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
         <a href="admin.php" title="Usuários" class="<?php echo ($pagina_atual == 'admin.php') ? 'active' : ''; ?>">
             <i class="bi bi-people-fill me-2"></i><span>Usuários</span>
         </a>
     <?php endif; ?>
-
     <a href="logout.php" class="mt-auto text-danger border-top border-secondary" title="Sair">
         <i class="bi bi-box-arrow-right me-2"></i><span>Sair</span>
     </a>
@@ -187,20 +204,12 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
 <div class="content" id="content">
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div class="d-flex align-items-center gap-3">
-            <button class="btn btn-outline-dark border-0 shadow-sm" id="btnToggleMenu">
-                <i class="bi bi-list fs-5"></i>
-            </button>
-            <div>
-                <h4 class="fw-bold text-dark mb-1">Visão Geral da Frota</h4>
-                <p class="text-muted small mb-0">Monitoramento em tempo real</p>
-            </div>
+            <button class="btn btn-outline-dark border-0 shadow-sm" id="btnToggleMenu"><i class="bi bi-list fs-5"></i></button>
+            <div><h4 class="fw-bold text-dark mb-1">Visão Geral da Frota</h4><p class="text-muted small mb-0">Monitoramento em tempo real</p></div>
         </div>
-        
         <div class="d-flex gap-2 w-50 justify-content-end">
             <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
-            <button class="btn btn-sm btn-dark" onclick="mostrarDebug()">
-                <i class="bi bi-bug"></i> Debug
-            </button>
+            <button class="btn btn-sm btn-dark" onclick="mostrarDebug()"><i class="bi bi-bug"></i> Debug</button>
             <?php endif; ?>
             <div class="position-relative w-50">
                 <i class="bi bi-search search-icon"></i>
@@ -222,7 +231,6 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                     <?php endforeach; ?>
                 </select>
             </div>
-
             <div class="col-md-3">
                 <label class="form-label small fw-bold text-secondary mb-1">Sentido:</label>
                 <select name="sentido" class="form-select form-select-sm" onchange="this.form.submit()">
@@ -231,7 +239,6 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                     <option value="volta" <?php echo ($filtro_sentido === 'volta') ? 'selected' : ''; ?>>⬅️ VOLTA</option>
                 </select>
             </div>
-
             <div class="col-md-4">
                 <label class="form-label small fw-bold text-secondary mb-1">Status (Tempo Real):</label>
                 <select id="filtroStatusJS" class="form-select form-select-sm" onchange="aplicarFiltrosFrontend()">
@@ -244,7 +251,6 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                     <option value="aguardando">⏳ Aguardando</option>
                 </select>
             </div>
-
             <?php if (!empty($filtro_empresa) || !empty($filtro_sentido)): ?>
             <div class="col-auto align-self-end">
                 <a href="/" class="btn btn-outline-danger btn-sm mb-1"><i class="bi bi-x-circle me-1"></i>Limpar</a>
@@ -283,178 +289,19 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
                         </tr>
                     </thead>
                     <tbody id="tabela-veiculos">
-  <?php 
-    // --- FUNÇÃO DE CÁLCULO DE TEMPO ---
-    if (!function_exists('diffMinutosPHP')) {
-        function diffMinutosPHP($h_prog, $h_real) {
-            if ($h_prog == 'N/D' || $h_real == 'N/D' || empty($h_prog) || empty($h_real)) return 0;
-            $t_prog = DateTime::createFromFormat('H:i', $h_prog);
-            $t_real = DateTime::createFromFormat('H:i', $h_real);
-            if (!$t_prog || !$t_real) return 0;
-            return ($t_real->getTimestamp() - $t_prog->getTimestamp()) / 60;
-        }
-    }
-
-    $contador_linhas_exibidas = 0;
-
-    foreach ($todas_linhas as $linha): 
-        
-        $id_linha = $linha['idLinha'] ?? '';
-
-        // --- FILTROS ---
-        if (!empty($filtro_empresa) && ($linha['empresa']['nome'] ?? '') !== $filtro_empresa) continue;
-
-        $sIdaRaw = $linha['sentidoIDA'] ?? $linha['sentidoIda'] ?? true;
-        $sentido_ida_bool = filter_var($sIdaRaw, FILTER_VALIDATE_BOOLEAN);
-        $sentido_string = $sentido_ida_bool ? 'ida' : 'volta';
-
-        if (!empty($filtro_sentido) && $sentido_string !== $filtro_sentido) continue;
-
-        $contador_linhas_exibidas++;
-
-        // --- PREPARAÇÃO DE DADOS ---
-        $prog = $linha['horarioProgramado'] ?? '23:59';
-        $real = $linha['horarioReal'] ?? 'N/D';
-        $data_prog_fim = htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES);
-        
-        // RECUPERA CACHE
-        $timestamp_cache = $linha['previsao_fim_ts'] ?? ''; 
-        $tem_cache = !empty($timestamp_cache);
-        $valor_cache = $tem_cache ? date('H:i', $timestamp_cache) : '--:--';
-
-        $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
-        $icon_sentido = $sentido_ida_bool 
-            ? '<i class="bi bi-arrow-right-circle-fill text-primary ms-1" title="IDA"></i>' 
-            : '<i class="bi bi-arrow-left-circle-fill text-warning ms-1" title="VOLTA"></i>';
-
-        // --- LÓGICA DE STATUS COMPLETA (PHP) ---
-        $status_html = '';
-        $atraso_saida = false;
-        $tolerancia = 10; // 10 minutos de tolerância
-
-        if (($linha['categoria'] ?? '') == 'Carro desligado') {
-             $status_html = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
-        }
-        elseif ($real == 'N/D' || empty($real)) {
-             // 1. AINDA NÃO SAIU
-             $diff = diffMinutosPHP($prog, $hora_atual);
-             if ($diff > $tolerancia) {
-                 $atraso_saida = true;
-                 $status_html = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
-             } else {
-                 $status_html = '<span class="badge bg-light text-dark border">Aguardando</span>';
-             }
-        }
-        else {
-             // 2. JÁ SAIU (EM PERCURSO)
-             $diff_saida = diffMinutosPHP($prog, $real);
-             
-             // Calcula atraso de percurso
-             $atraso_percurso = false;
-
-             // *** ALTERAÇÃO AQUI ***
-             // Adicionado '&& $sentido_ida_bool'. 
-             // Se for VOLTA (false), não calcula atraso de chegada, olhando apenas a saída.
-             if ($sentido_ida_bool && $tem_cache && $data_prog_fim != 'N/D') {
-                 $diff_chegada = diffMinutosPHP($data_prog_fim, $valor_cache);
-                 if ($diff_chegada > $tolerancia) {
-                     $atraso_percurso = true;
-                 }
-             }
-
-             if ($atraso_percurso) {
-                 // Lógica exclusiva para IDA com problemas no trajeto
-                 if ($diff_saida > $tolerancia) {
-                     $status_html = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
-                 } else {
-                     $status_html = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
-                 }
-             } elseif ($diff_saida > $tolerancia) {
-                 // Se for VOLTA e atrasou a saída, cai aqui.
-                 // Se for IDA sem previsão de percurso ruim, mas saiu atrasado, cai aqui.
-                 $status_html = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
-             } else {
-                 // Saiu no horário (e se for Ida, previsão de chegada está ok)
-                 $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
-             }
-        }
-
-        // Atributos HTML
-        $tr_attr = ($atraso_saida ? 'data-atraso-tipo="saida"' : '') . ' data-sentido-ida="' . $sentido_ida_attr . '" data-id-linha="' . htmlspecialchars($id_linha) . '"';
-        $placa_clean = htmlspecialchars($linha['veiculo']['veiculo'] ?? '', ENT_QUOTES);
-        $id_prev_fim = "prev-fim-" . $placa_clean;
-        $id_prev_ini = "prev-ini-" . $placa_clean;
-        $data_placa = $placa_clean;
-        
-        $ja_saiu = ($real != 'N/D');
-        // Só calcula JS se já saiu, não está desligado, não tem cache E (opcionalmente) se for Ida, dependendo da sua regra de negócio para o front.
-        // Mantive a lógica original aqui, apenas a flag de status mudou.
-        $deve_calcular = ($ja_saiu && $linha['categoria'] != 'Carro desligado' && !$tem_cache) ? 'true' : 'false';
-        
-        $classe_prev = "text-muted";
-        if ($tem_cache && $data_prog_fim != 'N/D') {
-             $classe_prev = ($valor_cache > $data_prog_fim) ? "text-danger fw-bold" : "text-success fw-bold";
-        }
-    ?>
-        <tr <?php echo $tr_attr; ?>>
-            <td><?php echo htmlspecialchars($linha['empresa']['nome'] ?? 'N/D'); ?></td>
-            <td>
-                <?php echo htmlspecialchars($linha['descricaoLinha'] ?? 'N/D'); ?>
-                <?php echo $icon_sentido; ?>
-            </td>
-            <td class="fw-bold text-primary"><?php echo $placa_clean; ?></td>
-            <td id="<?php echo $id_prev_ini; ?>" class="text-muted small">--:--</td>
-            <td class="<?php echo $atraso_saida ? 'text-danger fw-bold' : ''; ?>">
-                <?php echo htmlspecialchars($linha['horarioProgramado'] ?? 'N/D'); ?>
-            </td>
-            <td><?php echo htmlspecialchars($linha['horarioReal'] ?? 'N/D'); ?></td>
-            <td><strong><?php echo htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D'); ?></strong></td>
-            
-             <td id="<?php echo $id_prev_fim; ?>" 
-                class="<?php echo $classe_prev; ?> celula-previsao" 
-                data-placa="<?php echo $data_placa; ?>"
-                data-prog-fim="<?php echo $data_prog_fim; ?>"
-                data-ts-cache="<?php echo $timestamp_cache; ?>" 
-                data-calcular="<?php echo $deve_calcular; ?>"
-                data-id-linha="<?php echo htmlspecialchars($id_linha); ?>">
-                <?php echo $valor_cache; ?>
-            </td>
-
-            <td title="<?php echo htmlspecialchars($linha['ultimaData'] ?? ''); ?>"><?php echo htmlspecialchars($linha['ultimaData'] ?? 'N/D'); ?></td>
-            <td>
-                <?php echo $status_html; ?>
-            </td>
-             <td class="text-center">
-                <button class="btn btn-outline-primary btn-xs rounded-circle" title="Prev. Inicial"
-                    onclick="buscarRastreamentoinicial('<?php echo $placa_clean; ?>', '<?php echo htmlspecialchars($linha['localinicial'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($linha['horarioProgramado'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($id_linha); ?>', this)">
-                    <i class="bi bi-clock"></i>
-                </button>
-            </td>
-            <td class="text-center">
-                <button class="btn btn-primary btn-sm rounded-circle shadow-sm" 
-                    onclick="buscarRastreamento('<?php echo $placa_clean; ?>', '<?php echo htmlspecialchars($linha['localfinal'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($id_linha); ?>', this)">
-                    <i class="bi bi-geo-alt-fill"></i>
-                </button>
-            </td>
-        </tr>
-    <?php endforeach; ?>
-    <?php if ($contador_linhas_exibidas === 0): ?>
-        <tr><td colspan="12" class="text-center py-4 text-muted">Nenhum veículo encontrado com os filtros selecionados.</td></tr>
-    <?php endif; ?>
-</tbody>
-</table>
-</div></div></div></div>
+                        <?php renderizar_linhas_tabela($todas_linhas, $filtro_empresa, $filtro_sentido, $hora_atual); ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
 
 <div class="modal fade" id="debugModal" tabindex="-1">
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
-      <div class="modal-header bg-dark text-white">
-        <h5 class="modal-title">🐛 JSON 1º Veículo</h5>
-        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body">
-        <textarea class="form-control" rows="15" style="font-family: monospace; font-size: 0.8rem;"><?php echo $primeiro_veiculo_json; ?></textarea>
-      </div>
+      <div class="modal-header bg-dark text-white"><h5 class="modal-title">🐛 JSON 1º Veículo</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body"><textarea class="form-control" rows="15" style="font-family: monospace; font-size: 0.8rem;"><?php echo $primeiro_veiculo_json; ?></textarea></div>
     </div>
   </div>
 </div>
@@ -462,16 +309,14 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
 <div class="modal fade" id="popupResultado" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-lg">
     <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h5 class="modal-title fw-bold text-primary"><i class="bi bi-map me-2"></i>Detalhamento da Rota</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-      </div>
+      <div class="modal-header border-0 pb-0"><h5 class="modal-title fw-bold text-primary"><i class="bi bi-map me-2"></i>Detalhamento da Rota</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
       <div class="modal-body p-0">
         <div id="resultadoConteudo" class="px-3 pt-2"></div>
         <div id="mapaRota"></div>
         <div class="d-flex justify-content-center gap-3 py-2 small bg-light border-top">
-            <span class="d-flex align-items-center"><i class="bi bi-circle-fill text-danger me-1"></i> Rota Percorrida</span>
-            <span class="d-flex align-items-center"><i class="bi bi-circle-fill text-primary me-1"></i> Rota Futura</span>
+            <span class="d-flex align-items-center"><i class="bi bi-circle-fill me-1"></i> Rota Percorrida</span>
+            <span class="d-flex align-items-center"><i class="bi bi-circle-fill text-danger me-1"></i> Rota Fixa (Oficial)</span>
+            <span class="d-flex align-items-center"><i class="bi bi-circle-fill text-primary me-1"></i> Previsão Futura</span>
         </div>
       </div>
     </div>
@@ -495,28 +340,26 @@ $primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null);
 <script>
 let mapaInstancia = null;
 let routingControlFuture = null; 
-let routingControlPast = null;
 let direcaoAtual = {};
+let currentController = null; 
+let renderToken = 0;
 
-// --- CONTROLE DE CONCORRÊNCIA ---
-let currentController = null; // Para cancelar requisições HTTP
-let renderToken = 0;          // Para cancelar desenhos de mapa antigos
-
-function mostrarDebug() {
-    new bootstrap.Modal(document.getElementById('debugModal')).show();
-}
+function mostrarDebug() { new bootstrap.Modal(document.getElementById('debugModal')).show(); }
 
 document.addEventListener("DOMContentLoaded", function() {
     const modalElement = document.getElementById('popupResultado');
-    modalElement.addEventListener('shown.bs.modal', function () {
-        if (mapaInstancia) mapaInstancia.invalidateSize();
+    modalElement.addEventListener('shown.bs.modal', function () { if (mapaInstancia) mapaInstancia.invalidateSize(); });
+    modalElement.addEventListener('hidden.bs.modal', function () {
+        if (currentController) { currentController.abort(); currentController = null; }
+        renderToken++; limparMapaSeguro();
     });
 
-    // LISTENER DE BUSCA DE TEXTO
     const searchInput = document.getElementById('searchInput');
+    let timeoutSearch = null;
     if (searchInput) {
         searchInput.addEventListener('keyup', function() {
-            aplicarFiltrosFrontend();
+            clearTimeout(timeoutSearch);
+            timeoutSearch = setTimeout(aplicarFiltrosFrontend, 300); // Debounce
         });
     }
 
@@ -524,183 +367,119 @@ document.addEventListener("DOMContentLoaded", function() {
     carregarPrevisoesAutomaticamente();
     iniciarAtualizacaoAutomatica();
     atualizarCardsResumo(); 
+    
+    // Toggle Sidebar
+    const btnToggle = document.getElementById('btnToggleMenu');
+    const sidebar = document.getElementById('sidebar');
+    const content = document.getElementById('content');
+    if (btnToggle) {
+        btnToggle.addEventListener('click', function() {
+            sidebar.classList.toggle('toggled');
+            content.classList.toggle('toggled');
+            setTimeout(() => { if (mapaInstancia) mapaInstancia.invalidateSize(); }, 350);
+        });
+    }
 });
 
-// --- FUNÇÃO UNIFICADA DE FILTROS FRONT-END ---
 function aplicarFiltrosFrontend() {
-    const termoBusca = document.getElementById('searchInput') ? document.getElementById('searchInput').value.toLowerCase() : '';
-    const statusFiltro = document.getElementById('filtroStatusJS') ? document.getElementById('filtroStatusJS').value : '';
-    const linhas = document.querySelectorAll("table tbody tr");
-    
-    // Lista para guardar as células que ficaram visíveis
+    const termoBusca = document.getElementById('searchInput')?.value.toLowerCase() || '';
+    const statusFiltro = document.getElementById('filtroStatusJS')?.value || '';
+    const linhas = document.querySelectorAll("#tabela-veiculos tr");
     const celulasParaCalcular = [];
 
-    linhas.forEach(function(linha) {
-        // 1. Verificação de Texto (Busca Geral)
-        const textoLinha = linha.textContent.toLowerCase();
-        const matchTexto = textoLinha.includes(termoBusca);
-
-        // 2. Verificação de Status
-        let matchStatus = true;
+    linhas.forEach(linha => {
+        if (linha.cells.length < 10) return; // Ignora linha de "Nenhum resultado"
         
-        if (statusFiltro !== '') {
-            const celulaStatus = linha.cells[9]; 
-            const textoStatus = celulaStatus ? celulaStatus.innerText.toLowerCase().trim() : '';
-
-            switch (statusFiltro) {
-                case 'atrasado_geral': matchStatus = textoStatus.includes('atrasado'); break;
-                case 'atrasado_saida': matchStatus = textoStatus.includes('(inicial)') || textoStatus.includes('(p. inicial)'); break;
-                case 'atrasado_percurso': matchStatus = textoStatus.includes('(percurso)'); break;
-                case 'pontual': matchStatus = textoStatus.includes('pontual'); break;
-                case 'desligado': matchStatus = textoStatus.includes('desligado'); break;
-                case 'aguardando': matchStatus = textoStatus.includes('aguardando'); break;
-                default: matchStatus = true;
-            }
+        const textoLinha = linha.textContent.toLowerCase();
+        const matchTexto = !termoBusca || textoLinha.includes(termoBusca);
+        
+        let matchStatus = true;
+        if (statusFiltro) {
+            const textoStatus = linha.cells[9].innerText.toLowerCase();
+            if (statusFiltro === 'atrasado_geral') matchStatus = textoStatus.includes('atrasado');
+            else if (statusFiltro === 'atrasado_saida') matchStatus = textoStatus.includes('(inicial)') || textoStatus.includes('(p. inicial)');
+            else if (statusFiltro === 'atrasado_percurso') matchStatus = textoStatus.includes('(percurso)');
+            else if (statusFiltro === 'pontual') matchStatus = textoStatus.includes('pontual');
+            else if (statusFiltro === 'desligado') matchStatus = textoStatus.includes('desligado');
+            else if (statusFiltro === 'aguardando') matchStatus = textoStatus.includes('aguardando');
         }
 
-        // Exibe apenas se passar nos DOIS filtros
         if (matchTexto && matchStatus) {
             linha.style.display = "";
-            
-            // Se a linha está visível, adiciona a célula de previsão à lista de prioridade
             const celulaPrev = linha.querySelector('.celula-previsao');
-            if (celulaPrev && celulaPrev.innerText.includes('--:--')) {
-                celulasParaCalcular.push(celulaPrev);
-            }
+            if (celulaPrev && celulaPrev.innerText.includes('--:--')) celulasParaCalcular.push(celulaPrev);
         } else {
             linha.style.display = "none";
         }
     });
-    
-    // Atualizar contadores visuais
-    atualizarCardsResumo(); 
-    
-    // --- NOVO: Dispara o cálculo APENAS para as linhas filtradas ---
-    if (celulasParaCalcular.length > 0) {
-        carregarPrevisoesAutomaticamente(celulasParaCalcular);
-    }
+
+    atualizarCardsResumo();
+    if (celulasParaCalcular.length > 0) carregarPrevisoesAutomaticamente(celulasParaCalcular);
 }
 
-// --- MODIFICAÇÃO: Função para forçar atualização visual de status baseada no relógio do cliente ---
 function revisarStatusTimeBased() {
-    const linhas = document.querySelectorAll("table tbody tr");
+    const linhas = document.querySelectorAll("#tabela-veiculos tr");
     const agora = new Date();
     const horaAtualStr = String(agora.getHours()).padStart(2, '0') + ":" + String(agora.getMinutes()).padStart(2, '0');
-
     let houveMudanca = false;
 
     linhas.forEach(row => {
-        // Célula de Status (índice 9)
+        if(row.cells.length < 10) return;
         const statusCell = row.cells[9];
-        // Célula de Programação Início (índice 4)
-        const progInicioCell = row.cells[4];
-        // Célula de Real Início (índice 5)
-        const realInicioCell = row.cells[5];
-
-        if (!statusCell || !progInicioCell || !realInicioCell) return;
-
-        const realInicio = realInicioCell.innerText.trim();
-        const progInicio = progInicioCell.innerText.trim();
+        const progInicio = row.cells[4].innerText.trim();
+        const realInicio = row.cells[5].innerText.trim();
         const textoStatus = statusCell.innerText.trim();
 
-        // LÓGICA: Se o veículo NÃO saiu (Real == N/D ou vazio) e NÃO está desligado
         if ((realInicio === 'N/D' || realInicio === '') && !textoStatus.includes('Desligado')) {
-            
-            // Calcula atraso baseado na hora atual do navegador
             const diff = calcularDiferencaMinutos(progInicio, horaAtualStr);
-
-            // Se atraso > 10 min e o status atual não é de erro/atraso, atualiza
             if (diff > 10) {
                 if (!textoStatus.includes('Atrasado')) {
                     statusCell.innerHTML = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
                     houveMudanca = true;
                 }
-            } else {
-                // Se ainda está no horário (tolêrancia)
-                if (!textoStatus.includes('Aguardando')) {
-                    statusCell.innerHTML = '<span class="badge bg-light text-dark border">Aguardando</span>';
-                    houveMudanca = true;
-                }
+            } else if (!textoStatus.includes('Aguardando')) {
+                statusCell.innerHTML = '<span class="badge bg-light text-dark border">Aguardando</span>';
+                houveMudanca = true;
             }
         }
-        // Para veículos que JÁ saíram, a função atualizarStatusBadge (via carregarPrevisoes) cuida disso.
     });
-
-    // Se mudamos algum badge, precisamos re-filtrar a tabela caso o usuário esteja filtrando por status
-    if (houveMudanca) {
-        aplicarFiltrosFrontend();
-        atualizarCardsResumo(); // Atualiza os contadores lá em cima
-    }
+    if (houveMudanca) { aplicarFiltrosFrontend(); atualizarCardsResumo(); }
 }
 
 function iniciarAtualizacaoAutomatica() {
-    // Roda uma verificação imediata ao carregar
     revisarStatusTimeBased();
-
     setInterval(async () => {
-        // 1. Atualização via PHP (Server Side)
         try {
+            // OTIMIZAÇÃO: Busca apenas o TBODY, não a página toda.
             const urlAtual = new URL(window.location.href);
             urlAtual.searchParams.set('t', Date.now());
-            const controllerAuto = new AbortController();
-            const response = await fetch(urlAtual, { signal: controllerAuto.signal });
-            const text = await response.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(text, 'text/html');
-
-            const novoTbody = doc.getElementById('tabela-veiculos');
-            const tbodyAtual = document.getElementById('tabela-veiculos');
-
-            if (novoTbody && tbodyAtual) {
-                // Verifica se o conteúdo mudou efetivamente
-                if (tbodyAtual.innerHTML !== novoTbody.innerHTML) {
-                    tbodyAtual.innerHTML = novoTbody.innerHTML;
+            urlAtual.searchParams.set('ajax_tbody', '1'); // Flag especial
+            
+            const response = await fetch(urlAtual);
+            if(response.ok) {
+                const novoTbodyHTML = await response.text();
+                const tbodyAtual = document.getElementById('tabela-veiculos');
+                if (tbodyAtual && tbodyAtual.innerHTML !== novoTbodyHTML) {
+                    tbodyAtual.innerHTML = novoTbodyHTML;
                     carregarPrevisoesAutomaticamente();
                     aplicarFiltrosFrontend();
                 } else {
-                    // SE O HTML NÃO MUDOU (Banco de dados igual):
-                    // Força a verificação de status baseada no tempo local (ex: "Aguardando" -> "Atrasado")
-                    // pois o relógio correu, mesmo que o banco não tenha mudado.
                     revisarStatusTimeBased();
                 }
             }
-        } catch (e) { 
-            if (e.name !== 'AbortError') console.error("Erro refresh auto", e); 
-        }
-
-        // 2. Garante que as previsões em cache ou tela sejam re-validadas visualmente
-        // Isso ajuda a atualizar a cor do status de "Pontual" para "Atrasado" durante o trajeto
-        const celulasVisiveis = document.querySelectorAll('.celula-previsao:not(:empty)');
-        celulasVisiveis.forEach(celula => {
-             const est = celula.innerText.trim();
-             const progFim = celula.getAttribute('data-prog-fim');
-             if(est !== '--:--' && est !== 'N/D') {
-                 atualizarStatusBadge(celula, est, progFim);
-             }
+        } catch (e) { console.error("Erro refresh auto", e); }
+        
+        // Refresh visual dos badges
+        document.querySelectorAll('.celula-previsao:not(:empty)').forEach(celula => {
+            const est = celula.innerText.trim();
+            if(est !== '--:--' && est !== 'N/D') atualizarStatusBadge(celula, est, celula.getAttribute('data-prog-fim'));
         });
-
-    }, 30000); // 30 segundos
-}
-    
-const modalElement = document.getElementById('popupResultado');
-if(modalElement){
-    modalElement.addEventListener('hidden.bs.modal', function () {
-        // Ao fechar, cancela qualquer busca pendente para economizar rede
-        if (currentController) {
-            currentController.abort();
-            currentController = null;
-        }
-        renderToken++; // Invalida qualquer desenho pendente
-        limparMapaSeguro();
-    });
+    }, 30000);
 }
 
 function limparMapaSeguro() {
     if (mapaInstancia) {
-        try {
-            mapaInstancia.off();
-            mapaInstancia.remove();
-        } catch(e) { console.warn("Erro ao limpar mapa", e); }
+        try { mapaInstancia.off(); mapaInstancia.remove(); } catch(e) { console.warn("Erro ao limpar mapa", e); }
         mapaInstancia = null;
     }
     const divMapa = document.getElementById("mapaRota");
@@ -708,62 +487,50 @@ function limparMapaSeguro() {
 }
 
 async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, button, tipo) {
-    if (currentController) {
-        currentController.abort();
-    }
+    if (currentController) currentController.abort();
     currentController = new AbortController();
     const signal = currentController.signal;
-    
-    const meuToken = Date.now();
-    renderToken = meuToken;
+    renderToken = Date.now();
+    const meuToken = renderToken;
 
     const previsaoCell = button.closest('td'); 
     const textoOriginal = previsaoCell.innerHTML;
-    
     previsaoCell.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div>';
     
     limparMapaSeguro(); 
     document.getElementById("resultadoConteudo").innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div><p class="text-muted fw-bold">Buscando dados...</p><small class="text-muted">Linha ID: ${idLinha}</small></div>`;
-    
     new bootstrap.Modal(document.getElementById("popupResultado")).show();
 
     try {
         const baseUrl = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
-        const urlPrevisao = `${baseUrl}?idLinha=${idLinha}`;
-        
         const [respRastreio, respRota] = await Promise.all([
             fetch(`/buscar_rastreamento/${placa}`, { signal }), 
-            fetch(urlPrevisao, { signal }) 
+            fetch(`${baseUrl}?idLinha=${idLinha}`, { signal }) 
         ]);
         
-        if (renderToken !== meuToken) return; 
-
+        if (renderToken !== meuToken) return;
         const data = await respRastreio.json();
         const rotaData = await respRota.json();
-        
         previsaoCell.innerHTML = textoOriginal;
 
-        if (renderToken !== meuToken) return;
-
         let latVeiculo = null, lngVeiculo = null;
-        let latDestino = null, lngDestino = null;
         let veiculoData = (Array.isArray(data) && data.length > 0) ? data[0] : null;
         
         if (veiculoData) {
             if (veiculoData.lat) { latVeiculo = veiculoData.lat; lngVeiculo = veiculoData.lng; }
-            else if (veiculoData.loc) { if (typeof veiculoData.loc === 'string') { const p = veiculoData.loc.split(','); latVeiculo = p[0]; lngVeiculo = p[1]; } else if (Array.isArray(veiculoData.loc)) { latVeiculo = veiculoData.loc[0]; lngVeiculo = veiculoData.loc[1]; } }
+            else if (veiculoData.loc) { 
+                const p = (typeof veiculoData.loc === 'string') ? veiculoData.loc.split(',') : veiculoData.loc;
+                latVeiculo = p[0]; lngVeiculo = p[1];
+            }
             
             const enderecoAtual = veiculoData.endereco || veiculoData.loc || 'Endereço não identificado';
             let horarioEstimado = '--';
-            
             if (rotaData.duracaoSegundos) {
-                 const agora = new Date();
-                 const chegada = new Date(agora.getTime() + rotaData.duracaoSegundos * 1000);
-                 const h = String(chegada.getHours()).padStart(2, '0');
-                 const m = String(chegada.getMinutes()).padStart(2, '0');
-                 horarioEstimado = `${h}:${m}`;
+                 const chegada = new Date(new Date().getTime() + rotaData.duracaoSegundos * 1000);
+                 horarioEstimado = String(chegada.getHours()).padStart(2, '0') + ":" + String(chegada.getMinutes()).padStart(2, '0');
             }
 
+            // Atualiza células na tabela principal se necessário
             if (tipo === 'final' && horarioEstimado !== '--') {
                 const cell = document.getElementById('prev-fim-' + placa);
                 if (cell) {
@@ -771,44 +538,37 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
                     cell.className = (horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'fw-bold text-danger' : 'fw-bold text-success';
                     atualizarStatusBadge(cell, horarioEstimado, horarioFinalProg);
                 }
-            }
-            if (tipo === 'inicial' && horarioEstimado !== '--') {
+            } else if (tipo === 'inicial' && horarioEstimado !== '--') {
                 const cellIni = document.getElementById('prev-ini-' + placa);
-                if (cellIni) {
-                    cellIni.innerText = horarioEstimado;
-                    cellIni.className = 'fw-bold text-info small';
-                }
+                if (cellIni) { cellIni.innerText = horarioEstimado; cellIni.className = 'fw-bold text-info small'; }
             }
 
             const labelProg = (tipo === 'inicial') ? 'Inicial Programado' : 'Final Programado';
             const labelEst = (tipo === 'inicial') ? 'Chegada Prevista' : 'Previsão Atualizada';
             const statusCor = (horarioEstimado !== '--' && horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'text-danger fw-bold' : (horarioEstimado !== '--' ? 'text-success fw-bold' : 'text-dark');
-            const tituloDestino = tipo === 'inicial' ? 'Ponto Inicial' : 'Ponto Final';
             
             document.getElementById("resultadoConteudo").innerHTML = `
             <div class="container-fluid px-3 pt-3">
                 <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light">
                     <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'}</h5>
-                    <span class="badge bg-success">Online</span>
-                    <span class="badge bg-secondary ms-2 small">Rota ID: ${idLinha}</span>
+                    <span class="badge bg-success">Online</span> <span class="badge bg-secondary ms-2 small">Rota ID: ${idLinha}</span>
                 </div>
                 <div class="row g-2 mb-3">
                     <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Origem</small><br><span id="txt-origem" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${enderecoAtual}</span></div></div>
-                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Destino (${tituloDestino})</small><br><span id="txt-destino" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${localAlvo || 'N/D'}</span></div></div>
+                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Destino</small><br><span id="txt-destino" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${localAlvo || 'N/D'}</span></div></div>
                 </div>
                 <div class="row g-2 mb-3">
                     <div class="col-6"><div class="p-3 border rounded bg-light shadow-sm h-100 text-center"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">${labelProg}</small><br><span class="d-block text-dark fw-semibold fs-4">${horarioFinalProg || 'N/D'}</span></div></div>
                     <div class="col-6"><div class="p-3 border rounded shadow-sm h-100 text-center" style="background-color: #f0f8ff;"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">${labelEst}</small><br><span class="d-block fs-4 ${statusCor}">${horarioEstimado}</span></div></div>
                 </div>
                 <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light" style="background-color: #e0f2fe;">
-                    <strong class="text-dark" style="font-size: 1.1rem;"><i class="bi bi-stopwatch-fill me-2"></i>Estimativa:</strong>
-                    <div class="text-end"><span class="fs-4 fw-bold text-dark" id="info-tempo">${rotaData.tempo || '--'}</span><span class="text-muted mx-2">|</span><span class="fs-5 text-dark" id="info-distancia">${rotaData.distancia || '--'}</span></div>
+                    <strong class="text-dark"><i class="bi bi-stopwatch-fill me-2"></i>Estimativa:</strong>
+                    <div class="text-end"><span class="fs-4 fw-bold text-dark">${rotaData.tempo || '--'}</span><span class="text-muted mx-2">|</span><span class="fs-5 text-dark">${rotaData.distancia || '--'}</span></div>
                 </div>
             </div>`;
             
-            if (rotaData.lat) { latDestino = rotaData.lat; lngDestino = rotaData.lng; }
             if (latVeiculo && lngVeiculo) {
-                gerarMapaRota(latVeiculo, lngVeiculo, latDestino, lngDestino, (veiculoData?.endereco || 'Veículo'), localAlvo, rotaData.waypoints_usados, rotaData.todos_pontos_visual, tipo, meuToken);
+                gerarMapaRota(latVeiculo, lngVeiculo, rotaData.lat, rotaData.lng, (veiculoData?.endereco || 'Veículo'), localAlvo, rotaData.waypoints_usados, rotaData.todos_pontos_visual, rotaData.rastro_oficial, rotaData.rastro_real, tipo, meuToken);
             } else { 
                 document.getElementById("mapaRota").innerHTML = `<div class="text-center text-muted py-5">Coordenadas indisponíveis.</div>`; 
             }
@@ -826,14 +586,10 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
 async function processarEmLotes(items, limite, callback) {
     let index = 0;
     const executar = async () => {
-        if (index >= items.length) {
-            atualizarCardsResumo(); 
-            return;
-        }
+        if (index >= items.length) { atualizarCardsResumo(); return; }
         const lote = Array.from(items).slice(index, index + limite);
         index += limite;
-        const promessas = lote.map(item => callback(item));
-        await Promise.all(promessas);
+        await Promise.all(lote.map(item => callback(item)));
         await executar();
     };
     await executar();
@@ -841,206 +597,113 @@ async function processarEmLotes(items, limite, callback) {
 
 function atualizarCardsResumo() {
     let counts = { total: 0, atrasados: 0, pontual: 0, desligados: 0, deslocamento: 0, semInicio: 0 };
-    const linhas = document.querySelectorAll("table tbody tr");
-    
-    linhas.forEach(row => {
-        if (row.style.display === 'none') return; 
-
+    document.querySelectorAll("#tabela-veiculos tr").forEach(row => {
+        if (row.style.display === 'none' || row.cells.length < 10) return;
         counts.total++;
-        const statusCell = row.cells[9];
-        if (statusCell) {
-            const text = statusCell.innerText.trim();
-            if (text.includes("Atrasado")) {
-                if (text.includes("(Inicial)") && !text.includes("Percurso")) {
-                    counts.semInicio++; 
-                } else {
-                    counts.atrasados++;
-                }
-            } else if (text.includes("Pontual")) {
-                counts.pontual++;
-            } else if (text.includes("Desligado")) {
-                counts.desligados++;
-            } else if (text.includes("Em deslocamento")) {
-                counts.deslocamento++;
-            } else if (text.includes("Aguardando")) {
-                counts.semInicio++;
-            } else {
-                counts.semInicio++;
-            }
-        }
+        const text = row.cells[9].innerText.trim();
+        if (text.includes("Atrasado")) {
+            if (text.includes("(Inicial)") && !text.includes("Percurso")) counts.semInicio++; 
+            else counts.atrasados++;
+        } else if (text.includes("Pontual")) counts.pontual++;
+        else if (text.includes("Desligado")) counts.desligados++;
+        else if (text.includes("Em deslocamento")) counts.deslocamento++;
+        else counts.semInicio++;
     });
-
-    const setVal = (id, val) => {
-        const el = document.getElementById(id);
-        if(el) el.innerText = val;
-    };
-    setVal('count-total', counts.total);
-    setVal('count-atrasados', counts.atrasados);
-    setVal('count-pontual', counts.pontual);
-    setVal('count-desligados', counts.desligados);
-    setVal('count-deslocamento', counts.deslocamento);
-    setVal('count-sem-inicio', counts.semInicio);
+    const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.innerText = val; };
+    setVal('count-total', counts.total); setVal('count-atrasados', counts.atrasados); setVal('count-pontual', counts.pontual);
+    setVal('count-desligados', counts.desligados); setVal('count-deslocamento', counts.deslocamento); setVal('count-sem-inicio', counts.semInicio);
 }
 
-function calcularDiferencaMinutos(horaBase, horaComparacao) {
-    if (!horaBase || !horaComparacao || horaBase === 'N/D' || horaComparacao === 'N/D' || horaComparacao === '--:--') {
-        return 0;
-    }
-    const [hB, mB] = horaBase.split(':').map(Number);
-    const [hC, mC] = horaComparacao.split(':').map(Number);
-    return (hC * 60 + mC) - (hB * 60 + mB);
-}
-
-function getHoraAtual() {
-    const now = new Date();
-    return String(now.getHours()).padStart(2,'0') + ":" + String(now.getMinutes()).padStart(2,'0');
+function calcularDiferencaMinutos(hB, hC) {
+    if (!hB || !hC || hB === 'N/D' || hC === 'N/D' || hC === '--:--') return 0;
+    const [bH, bM] = hB.split(':').map(Number);
+    const [cH, cM] = hC.split(':').map(Number);
+    return (cH * 60 + cM) - (bH * 60 + bM);
 }
 
 function atualizarStatusBadge(celula, horarioEstimado, horarioProgramado) {
     const tr = celula.closest('tr');
     if (!tr) return;
-    
-    const sentidoIda = tr.getAttribute('data-sentido-ida') === 'true';
     const statusCell = tr.cells[9];
-    if (!statusCell) return;
-
-    const textoAtual = statusCell.innerText.trim();
-    if (textoAtual === 'Desligado') return; 
+    if (!statusCell || statusCell.innerText.trim() === 'Desligado') return;
 
     const progInicio = tr.cells[4].innerText.trim();
     const realInicio = tr.cells[5].innerText.trim();
-    
-    const tolerancia = 10; 
+    const tolerancia = 10;
     let htmlBadge = '';
 
     if (realInicio === 'N/D' || realInicio === '') {
-        const agora = getHoraAtual();
-        const diffInicio = calcularDiferencaMinutos(progInicio, agora);
-        if (diffInicio > 10) {
-            htmlBadge = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
-        } else {
-            htmlBadge = '<span class="badge bg-light text-dark border">Aguardando</span>';
-        }
-        statusCell.innerHTML = htmlBadge;
-        // Reaplicar filtros caso o status tenha mudado
-        aplicarFiltrosFrontend();
-        return; 
-    }
-
-    const diffSaida = calcularDiferencaMinutos(progInicio, realInicio);
-    const diffChegada = calcularDiferencaMinutos(horarioProgramado, horarioEstimado);
-
-    if (sentidoIda) {
-        if (diffChegada > tolerancia) {
-            if (diffSaida > tolerancia) {
-                htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
-            } else {
-                htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
-            }
-        } else {
-            if (diffSaida < -tolerancia) {
-                htmlBadge = '<span class="badge bg-info text-dark rounded-pill">Pontual (Ini. Adiantado)</span>';
-            } else if (diffSaida > tolerancia) {
-                htmlBadge = '<span class="badge bg-warning text-dark rounded-pill">Pontual (Ini. Atrasado)</span>';
-            } else {
-                htmlBadge = '<span class="badge bg-success rounded-pill">Pontual</span>';
-            }
-        }
+        const diffInicio = calcularDiferencaMinutos(progInicio, new Date().toTimeString().substr(0,5));
+        htmlBadge = (diffInicio > 10) ? '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>' : '<span class="badge bg-light text-dark border">Aguardando</span>';
     } else {
-        if (diffSaida > tolerancia) {
-            htmlBadge = '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+        const diffSaida = calcularDiferencaMinutos(progInicio, realInicio);
+        const diffChegada = calcularDiferencaMinutos(horarioProgramado, horarioEstimado);
+        const sentidoIda = tr.getAttribute('data-sentido-ida') === 'true';
+
+        if (sentidoIda) {
+            if (diffChegada > tolerancia) htmlBadge = (diffSaida > tolerancia) ? '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>' : '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+            else htmlBadge = (diffSaida < -tolerancia) ? '<span class="badge bg-info text-dark rounded-pill">Pontual (Ini. Adiantado)</span>' : (diffSaida > tolerancia) ? '<span class="badge bg-warning text-dark rounded-pill">Pontual (Ini. Atrasado)</span>' : '<span class="badge bg-success rounded-pill">Pontual</span>';
         } else {
-            htmlBadge = '<span class="badge bg-success rounded-pill">Pontual</span>';
+            htmlBadge = (diffSaida > tolerancia) ? '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>' : '<span class="badge bg-success rounded-pill">Pontual</span>';
         }
     }
-
-    statusCell.innerHTML = htmlBadge;
-    
-    // IMPORTANTE: Reaplicar filtros pois o texto do status mudou
-    aplicarFiltrosFrontend();
+    if (statusCell.innerHTML !== htmlBadge) { statusCell.innerHTML = htmlBadge; aplicarFiltrosFrontend(); }
 }
 
 async function carregarPrevisoesAutomaticamente(elementosPrioritarios = null) {
-    // Se passarmos elementos específicos (os visíveis), usa eles. Se não, pega todos da tela.
     const celulas = elementosPrioritarios || document.querySelectorAll('.celula-previsao');
-    
     await processarEmLotes(celulas, 5, async (celula) => {
         const progFim = celula.getAttribute('data-prog-fim');
         const tsCache = celula.getAttribute('data-ts-cache');
-        const deveCalcular = celula.getAttribute('data-calcular');
-        
-        // Verificação extra: Se já está calculando ou já tem valor (não é --:-- e não é N/D), pula
-        const valorAtual = celula.innerText.trim();
-        const jaCalculando = celula.getAttribute('data-calculando') === 'true';
-        if (jaCalculando || (valorAtual !== '--:--' && valorAtual !== 'N/D' && valorAtual !== 'Erro')) {
-            return;
-        }
+        if (celula.getAttribute('data-calculando') === 'true' || (celula.innerText.trim() !== '--:--' && celula.innerText.trim() !== 'N/D')) return;
 
         if (tsCache) {
             const dateCache = new Date(parseInt(tsCache) * 1000);
-            const h = String(dateCache.getHours()).padStart(2, '0');
-            const m = String(dateCache.getMinutes()).padStart(2, '0');
-            const horarioCache = `${h}:${m}`;
+            const horarioCache = String(dateCache.getHours()).padStart(2,'0') + ":" + String(dateCache.getMinutes()).padStart(2,'0');
             celula.innerText = horarioCache;
             celula.className = (progFim !== 'N/D' && horarioCache > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
             atualizarStatusBadge(celula, horarioCache, progFim);
-            return; 
+            return;
         }
         
-        if (deveCalcular === 'true') {
-            const placa = celula.getAttribute('data-placa');
-            const idLinha = celula.getAttribute('data-id-linha'); 
-            
-            // Marca como 'calculando' para evitar dupla requisição
+        if (celula.getAttribute('data-calcular') === 'true') {
             celula.setAttribute('data-calculando', 'true');
             celula.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
-            
             try {
-                const response = await fetch(`/previsao/${placa}?idLinha=${idLinha}`);
+                const response = await fetch(`/previsao/${celula.getAttribute('data-placa')}?idLinha=${celula.getAttribute('data-id-linha')}`);
                 const data = await response.json();
-                
                 if (data.duracaoSegundos) {
-                    const agora = new Date();
-                    const chegada = new Date(agora.getTime() + data.duracaoSegundos * 1000);
-                    const h = String(chegada.getHours()).padStart(2, '0');
-                    const m = String(chegada.getMinutes()).padStart(2, '0');
-                    const est = `${h}:${m}`;
+                    const chegada = new Date(new Date().getTime() + data.duracaoSegundos * 1000);
+                    const est = String(chegada.getHours()).padStart(2,'0') + ":" + String(chegada.getMinutes()).padStart(2,'0');
                     celula.innerText = est;
                     celula.className = (progFim !== 'N/D' && est > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
                     atualizarStatusBadge(celula, est, progFim);
-                } else { 
-                    celula.innerText = 'N/D'; 
-                }
-            } catch (error) { 
-                celula.innerText = 'Erro'; 
-            } finally {
-                // Remove a marcação independente do resultado
-                celula.removeAttribute('data-calculando');
-            }
+                } else celula.innerText = 'N/D';
+            } catch (error) { celula.innerText = 'Erro'; } 
+            finally { celula.removeAttribute('data-calculando'); }
         }
     });
 }
 
 function ordenarTabela(n) {
-    const tabela = document.querySelector("table tbody");
-    const linhas = Array.from(tabela.rows);
+    const tbody = document.getElementById("tabela-veiculos");
+    const linhas = Array.from(tbody.rows);
     const asc = !direcaoAtual[n];
     direcaoAtual[n] = asc;
     linhas.sort((a, b) => {
-        const cellA = a.cells[n].innerText.trim().toLowerCase();
-        const cellB = b.cells[n].innerText.trim().toLowerCase();
+        const cellA = a.cells[n]?.innerText.trim().toLowerCase() || '';
+        const cellB = b.cells[n]?.innerText.trim().toLowerCase() || '';
         const numA = parseFloat(cellA.replace(',', '.'));
         const numB = parseFloat(cellB.replace(',', '.'));
-        if (!isNaN(numA) && !isNaN(numB)) { return asc ? numA - numB : numB - numA; }
+        if (!isNaN(numA) && !isNaN(numB)) return asc ? numA - numB : numB - numA;
         return asc ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
     });
-    linhas.forEach(linha => tabela.appendChild(linha));
+    linhas.forEach(linha => tbody.appendChild(linha));
 }
 
 function verificarAlertas() {
     let clientesCriticos = {};
-    const linhas = document.querySelectorAll("table tbody tr");
-    linhas.forEach(linha => {
+    document.querySelectorAll("#tabela-veiculos tr").forEach(linha => {
         if (linha.getAttribute("data-atraso-tipo") === "saida") {
             const empresa = linha.cells[0].innerText.trim(); 
             const rota = linha.cells[1].innerText.trim();
@@ -1050,173 +713,88 @@ function verificarAlertas() {
             clientesCriticos[empresa].push({ veiculo, rota, horario });
         }
     });
-    const totalLinhasCriticas = Object.values(clientesCriticos).flat().length;
-    if (totalLinhasCriticas > 0) {
-        const modalBody = document.getElementById('alertModalBody');
-        if (modalBody) {
-            let html = `<div class="alert alert-danger border-danger d-flex align-items-center mb-4">
-                <i class="bi bi-megaphone-fill fs-3 me-3 text-danger"></i>
-                <div><strong>Saída Atrasada!</strong><br><b>${totalLinhasCriticas}</b> veículo(s) atrasados.</div></div>`;
-            for (const [cliente, linhasCriticas] of Object.entries(clientesCriticos)) {
-                html += `<h6 class="fw-bold mt-3 mb-2 text-dark">${cliente} (${linhasCriticas.length})</h6><div class="list-group list-group-flush border rounded mb-4">`;
-                linhasCriticas.forEach(item => {
-                    html += `<div class="list-group-item d-flex justify-content-between px-3 py-2"><div>
-                        <span class="badge bg-dark me-2">${item.veiculo}</span><strong>${item.rota}</strong><br>
-                        <small class="text-danger">Prog: ${item.horario}</small></div></div>`;
-                });
-                html += `</div>`;
-            }
-            modalBody.innerHTML = html;
-            const modalAtraso = new bootstrap.Modal(document.getElementById('alertModal'));
-            modalAtraso.show();
+    const total = Object.values(clientesCriticos).flat().length;
+    if (total > 0) {
+        let html = `<div class="alert alert-danger border-danger d-flex align-items-center mb-4"><i class="bi bi-megaphone-fill fs-3 me-3 text-danger"></i><div><strong>Saída Atrasada!</strong><br><b>${total}</b> veículo(s) atrasados.</div></div>`;
+        for (const [cliente, lista] of Object.entries(clientesCriticos)) {
+            html += `<h6 class="fw-bold mt-3 mb-2 text-dark">${cliente} (${lista.length})</h6><div class="list-group list-group-flush border rounded mb-4">` + lista.map(i => `<div class="list-group-item d-flex justify-content-between px-3 py-2"><div><span class="badge bg-dark me-2">${i.veiculo}</span><strong>${i.rota}</strong><br><small class="text-danger">Prog: ${i.horario}</small></div></div>`).join('') + `</div>`;
         }
+        document.getElementById('alertModalBody').innerHTML = html;
+        new bootstrap.Modal(document.getElementById('alertModal')).show();
     }
 }
 
-function gerarMapaRota(latOrigem, lngOrigem, latDestino, lngDestino, nomeOrigem, nomeDestino, waypointsRota, todosPontos = [], tipoDestino, tokenSolicitante) {
+function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPontos=[], rastroOficial=[], rastroReal=[], tipo, tokenSolicitante) {
     if (tokenSolicitante !== renderToken) return;
-
-    const latO = parseFloat(latOrigem) || -23.5505; 
-    const lngO = parseFloat(lngOrigem) || -46.6333; 
-    const latD = parseFloat(latDestino) || latO; 
-    const lngD = parseFloat(lngDestino) || lngO;
-
     limparMapaSeguro();
+    latO = parseFloat(latO)|| -23.5505; lngO = parseFloat(lngO)|| -46.6333;
+    latD = parseFloat(latD)|| latO; lngD = parseFloat(lngD)|| lngO;
 
     try { mapaInstancia = L.map('mapaRota').setView([latO, lngO], 13); } catch (e) { return; }
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(mapaInstancia);
 
-    var busIcon = L.icon({ iconUrl: 'https://cdn-icons-png.flaticon.com/512/3448/3448339.png', iconSize: [38, 38], iconAnchor: [19, 38], popupAnchor: [0, -35] });
-    var redPinIcon = L.icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41] });
-    var greenPinIcon = L.icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png', iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41] });
-    var blackStopIcon = L.icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-black.png', iconSize: [18, 29], iconAnchor: [9, 29], popupAnchor: [1, -25], shadowSize: [29, 29] });
-    var blueStopIcon = L.icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png', iconSize: [18, 29], iconAnchor: [9, 29], popupAnchor: [1, -25], shadowSize: [29, 29] });
+    const iconBase = {iconSize:[25,41],iconAnchor:[12,41],popupAnchor:[1,-34],shadowSize:[41,41]};
+    const icons = {
+        bus: L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/3448/3448339.png',iconSize:[38,38],iconAnchor:[19,38],popupAnchor:[0,-35]}),
+        red: L.icon({...iconBase, iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png'}),
+        green: L.icon({...iconBase, iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png'}),
+        stopBlack: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-black.png',iconSize:[18,29],iconAnchor:[9,29],popupAnchor:[1,-25]}),
+        stopBlue: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',iconSize:[18,29],iconAnchor:[9,29],popupAnchor:[1,-25]})
+    };
+
+    let boundsTotal = L.latLngBounds();
+    boundsTotal.extend([latO, lngO]);
+
+    if (rastroOficial?.length) L.polyline(rastroOficial.map(c=>[c[1],c[0]]), {color:'#ff0505',weight:6,opacity:0.6}).addTo(mapaInstancia);
+    
+    let pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
+    if (pontosReais.length > 0) {
+        let line = L.polyline([...pontosReais.map(c=>[c[1],c[0]]), [latO,lngO]], {color:'#000',weight:5,opacity:0.6,dashArray:'1,6'}).addTo(mapaInstancia);
+        boundsTotal.extend(line.getBounds());
+    }
 
     let pointsFuture = [L.latLng(latO, lngO)];
-    if (tipoDestino === 'final') {
-        if (waypointsRota && waypointsRota.length > 0) {
-            for(let i = 1; i < waypointsRota.length - 1; i++) pointsFuture.push(L.latLng(waypointsRota[i][1], waypointsRota[i][0]));
-        }
-        pointsFuture.push(L.latLng(latD, lngD)); 
-    } else { pointsFuture.push(L.latLng(latD, lngD)); }
-
-    let pointsPast = [];
-    if (todosPontos && todosPontos.length > 0) {
-        if (tipoDestino === 'final') { 
-            todosPontos.forEach((p) => { if (p.passou) pointsPast.push(L.latLng(p.lat, p.lng)); });
-            const initialPoint = todosPontos[0];
-            const isAtInitialPoint = (Math.abs(latO - initialPoint.lat) < 0.00001) && (Math.abs(lngO - initialPoint.lng) < 0.00001);
-            if (pointsPast.length === 0 && !isAtInitialPoint) pointsPast.push(L.latLng(initialPoint.lat, initialPoint.lng));
-            else if (pointsPast.length > 0) {
-                const firstPastPoint = pointsPast[0];
-                if (!isAtInitialPoint && (initialPoint.lat !== firstPastPoint.lat || initialPoint.lng !== firstPastPoint.lng)) pointsPast.unshift(L.latLng(initialPoint.lat, initialPoint.lng));
-            }
-        } else { 
-             const initialPoint = todosPontos[0];
-             const isAtInitialPoint = (Math.abs(latO - initialPoint.lat) < 0.00001) && (Math.abs(lngO - initialPoint.lng) < 0.00001);
-             if (!isAtInitialPoint) pointsPast.push(L.latLng(initialPoint.lat, initialPoint.lng));
-        }
-    }
-    pointsPast.push(L.latLng(latO, lngO));
-
-    if (todosPontos && todosPontos.length > 0) {
-        todosPontos.forEach((ponto, index) => {
-            if (index === 0) L.marker([ponto.lat, ponto.lng], { icon: redPinIcon, zIndexOffset: 500 }).addTo(mapaInstancia).bindPopup(`<b>🚩 Ponto Inicial</b><br>${ponto.nome}`);
-            if (tipoDestino === 'final' && index === todosPontos.length - 1) L.marker([ponto.lat, ponto.lng], { icon: greenPinIcon, zIndexOffset: 500 }).addTo(mapaInstancia).bindPopup(`<b>🏁 Destino Final</b><br>${ponto.nome}`);
-            if (tipoDestino === 'final' && index > 0 && index < todosPontos.length - 1) {
-                let stopIcon = ponto.passou ? blackStopIcon : blueStopIcon;
-                let badgeClass = ponto.passou ? 'bg-dark' : 'bg-primary';
-                L.marker([ponto.lat, ponto.lng], { icon: stopIcon, zIndexOffset: 400 }).addTo(mapaInstancia).bindPopup(`<b>🚏 ${ponto.nome}</b><br><span class="badge ${badgeClass}">${ponto.passou ? 'Já passou' : 'Próxima parada'}</span>`);
-            }
-        });
-    }
-
-    if (pointsPast.length >= 2) {
-        routingControlPast = L.Routing.control({
-            waypoints: pointsPast,
-            lineOptions: { styles: [{color: '#343a40', opacity: 0.6, weight: 5, dashArray: '10, 10'}] },
-            createMarker: function() { return null; }, 
-            addWaypoints: false, draggableWaypoints: false, show: false, fitSelectedRoutes: false
-        }).addTo(mapaInstancia);
-    }
+    if (tipo === 'final' && waypoints?.length) waypoints.slice(1,-1).forEach(w => pointsFuture.push(L.latLng(w[1], w[0])));
+    pointsFuture.push(L.latLng(latD, lngD));
 
     if (tokenSolicitante !== renderToken) return;
 
     routingControlFuture = L.Routing.control({
         waypoints: pointsFuture,
-        lineOptions: { styles: [{color: '#0d6efd', opacity: 0.8, weight: 6}] },
-        createMarker: function(i, waypoint, n) {
-            if (i === 0) return L.marker(waypoint.latLng, {icon: busIcon, zIndexOffset: 1000}).bindPopup('<b>🚌 Veículo em Movimento</b>');
-            if (i === n - 1) {
-                let iconFinal = (tipoDestino === 'inicial') ? redPinIcon : greenPinIcon;
-                let popupFinal = (tipoDestino === 'inicial') ? '<b>🚩 Ponto Inicial (Destino)</b>' : '<b>🏁 Destino Final</b>';
-                return L.marker(waypoint.latLng, {icon: iconFinal, zIndexOffset: 900}).bindPopup(popupFinal);
-            }
+        lineOptions: { styles: [{color: '#0d6efd', opacity: 0.4, weight: 6}] },
+        createMarker: function(i, wp, n) {
+            if (i === 0) return L.marker(wp.latLng, {icon: icons.bus, zIndexOffset:1000}).bindPopup('<b>🚌 Veículo em Movimento</b>');
+            if (i === n - 1) return L.marker(wp.latLng, {icon: (tipo==='inicial'?icons.red:icons.green), zIndexOffset:900}).bindPopup(tipo==='inicial'?'<b>🚩 Ponto Inicial (Destino)</b>':'<b>🏁 Destino Final</b>');
             return null; 
         },
-        addWaypoints: false, draggableWaypoints: false, show: false, fitSelectedRoutes: true
+        addWaypoints: false, draggableWaypoints: false, show: false, fitSelectedRoutes: false
     }).addTo(mapaInstancia);
+
+    if (todosPontos?.length) {
+        todosPontos.forEach((p, i) => {
+            if (i === 0) L.marker([p.lat, p.lng], {icon: icons.red}).addTo(mapaInstancia).bindPopup(`<b>🚩 Ponto Inicial</b><br>${p.nome}`);
+            else if (tipo === 'final' && i === todosPontos.length-1) L.marker([p.lat, p.lng], {icon: icons.green}).addTo(mapaInstancia).bindPopup(`<b>🏁 Destino Final</b><br>${p.nome}`);
+            else if (tipo === 'final') L.marker([p.lat, p.lng], {icon: p.passou?icons.stopBlack:icons.stopBlue}).addTo(mapaInstancia).bindPopup(`<b>🚏 ${p.nome}</b><br><span class="badge ${p.passou?'bg-dark':'bg-primary'}">${p.passou?'Já passou':'Próxima parada'}</span>`);
+        });
+    }
 
     routingControlFuture.on('routesfound', function(e) {
         if (tokenSolicitante !== renderToken) return;
-        var routes = e.routes;
-        if (routes && routes.length > 0) {
-            const rota = routes[0];
-            let nomeOrigem = null;
-            let nomeDestino = null;
-            if (rota.instructions && rota.instructions.length > 0) {
-                nomeOrigem = rota.instructions[0].road;
-                for (let i = rota.instructions.length - 1; i >= 0; i--) {
-                    if (rota.instructions[i].road && rota.instructions[i].road.trim() !== "") {
-                        nomeDestino = rota.instructions[i].road;
-                        break;
-                    }
-                }
-            }
-            if (nomeOrigem && nomeOrigem.trim() !== "") {
-                 const elOrigem = document.getElementById('txt-origem');
-                 if (elOrigem) {
-                     const textoAntigo = elOrigem.innerText; 
-                     if (!textoAntigo.includes(nomeOrigem)) elOrigem.innerHTML = `<b>${nomeOrigem}</b> <br><small class='text-muted'>Ref: ${textoAntigo}</small>`;
-                 }
-            }
-            if (nomeDestino && nomeDestino.trim() !== "") {
-                 const elDestino = document.getElementById('txt-destino');
-                 if (elDestino) {
-                     const textoAntigoDest = elDestino.innerText;
-                     if (!textoAntigoDest.includes(nomeDestino)) elDestino.innerHTML = `<b>${nomeDestino}</b> <br><small class='text-muted'>Ref: ${textoAntigoDest}</small>`;
-                 }
-            }
+        const r = e.routes[0];
+        if (r.instructions?.length) {
+            const origem = r.instructions[0].road;
+            const dest = [...r.instructions].reverse().find(i=>i.road?.trim())?.road;
+            if(origem && document.getElementById('txt-origem')) document.getElementById('txt-origem').innerHTML = `<b>${origem}</b> <br><small class='text-muted'>Ref: ${document.getElementById('txt-origem').innerText}</small>`;
+            if(dest && document.getElementById('txt-destino')) document.getElementById('txt-destino').innerHTML = `<b>${dest}</b> <br><small class='text-muted'>Ref: ${document.getElementById('txt-destino').innerText}</small>`;
         }
+        boundsTotal.extend(L.polyline(r.coordinates).getBounds());
+        mapaInstancia.fitBounds(boundsTotal, {padding:[50,50], maxZoom:16, animate:true});
     });
-    routingControlFuture.on('routingerror', function(e) { console.warn("Erro rota:", e); });
+    setTimeout(() => { if (mapaInstancia && boundsTotal.isValid()) mapaInstancia.fitBounds(boundsTotal, {padding:[50,50], maxZoom:15}); }, 500);
 }
 
-async function buscarRastreamento(placa, localfinal, horarioFinalProg, idLinha, button) {
-    processarBusca(placa, localfinal, horarioFinalProg, idLinha, button, 'final');
-}
-
-async function buscarRastreamentoinicial(placa, localinicial, horarioFinalProg, idLinha, button) {
-    processarBusca(placa, localinicial, horarioFinalProg, idLinha, button, 'inicial'); 
-}
-const btnToggle = document.getElementById('btnToggleMenu');
-const sidebar = document.getElementById('sidebar');
-const content = document.getElementById('content');
-
-if (btnToggle) {
-    btnToggle.addEventListener('click', function() {
-        sidebar.classList.toggle('toggled');
-        content.classList.toggle('toggled');
-
-        // Se o mapa estiver aberto, é necessário avisar o Leaflet que o tamanho da div mudou
-        // para evitar áreas cinzas. Aguardamos a transição do CSS (300ms).
-        setTimeout(() => {
-            if (mapaInstancia) {
-                mapaInstancia.invalidateSize();
-            }
-        }, 350);
-    });
-}
+function buscarRastreamento(p,l,h,i,b) { processarBusca(p,l,h,i,b,'final'); }
+function buscarRastreamentoinicial(p,l,h,i,b) { processarBusca(p,l,h,i,b,'inicial'); }
 </script>
 </body>
 </html>
