@@ -1,7 +1,7 @@
 <?php
 
 // ==============================================================================
-// CONFIGURAÇÃO & CONSTANTES
+// CONFIGURAÇÃO & CONSTANTEScitol92215@idwager.comtededec562@idwager.com
 // ==============================================================================
 
 define('TOMTOM_KEYS', [
@@ -11,7 +11,9 @@ define('TOMTOM_KEYS', [
     "WquMopwFZcPTeG4s6WkxkzhnMM3w1OGH",
     "ZQx0TqIl2gkDsgF3Yw4G4qwQG6jKp77N",
     "GK7A9HjGG0cOSN1UqADrkifoN0HExUzy",
-    "y7k9fPzIQr27uNWDYCZfsS6zX73G25z8"
+    "y7k9fPzIQr27uNWDYCZfsS6zX73G25z8",
+    "0sZFxbwSeEKUti72AnYAZapyMCVSQYLe",
+    "k1d8gtGfmXzyD03nTj8Ea2C8fTqGuC8K"
 ]);
 
 define('COOKIE_FILE', sys_get_temp_dir() . '/cookie_rastreamento_api.txt');
