@@ -193,9 +193,17 @@ if (isset($_GET['ajax_tbody'])) {
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div class="d-flex align-items-center gap-3">
             <button class="btn btn-outline-dark border-0 shadow-sm" id="btnToggleMenu"><i class="bi bi-list fs-5"></i></button>
-            <div><h4 class="fw-bold text-dark mb-1">Visão Geral da Frota</h4><p class="text-muted small mb-0">Monitoramento em tempo real <?php if($usando_cache) echo '<span class="badge bg-light text-secondary border">⚡ Cache</span>'; ?></p></div>
+            <div>
+                <h4 class="fw-bold text-dark mb-1">Visão Geral da Frota</h4>
+                <p class="text-muted small mb-0">Monitoramento em tempo real <?php if($usando_cache) echo '<span class="badge bg-light text-secondary border">⚡ Cache</span>'; ?></p>
+            </div>
         </div>
-        <div class="d-flex gap-2 w-50 justify-content-end">
+        
+        <div class="d-flex gap-2 w-50 justify-content-end align-items-center">
+            <button class="btn btn-white border shadow-sm" onclick="toggleFullScreen()" title="Modo Tela Cheia" style="height: 45px; width: 45px;">
+                <i class="bi bi-arrows-fullscreen"></i>
+            </button>
+
             <div class="position-relative w-50">
                 <i class="bi bi-search search-icon"></i>
                 <input type="text" id="searchInput" class="form-control search-bar" placeholder="Busca Inteligente (Placa, Linha, Empresa)...">
@@ -834,6 +842,19 @@ function verificarAlertas() {
 
 function buscarRastreamento(p,l,h,i,b) { processarBusca(p,l,h,i,b,'final'); }
 function buscarRastreamentoinicial(p,l,h,i,b) { processarBusca(p,l,h,i,b,'inicial'); }
+
+// --- FUNÇÃO TELA CHEIA ---
+function toggleFullScreen() {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(err => {
+            console.log(`Erro ao tentar ativar tela cheia: ${err.message}`);
+        });
+    } else {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        }
+    }
+}
 </script>
 </body>
 </html>
