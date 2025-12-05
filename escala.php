@@ -1,262 +1,158 @@
 <?php
-
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-// Carrega configurações e lógica
+// --- CONFIGURAÇÃO E SESSÃO ---
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'config.php'; 
 require_once 'menus.php'; 
 require_once 'includes/page_logic.php';
 
-// --- SEGURANÇA ---
 if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true) {
-    header("Location: login.php");
-    exit;
+    header("Location: login.php"); exit;
 }
-// --- BLOQUEIO DE SEGURANÇA ---
-// O parâmetro 'relatorios' deve ser igual ao que você salvou no banco/array
+session_write_close();
 verificarPermissaoPagina('escala');
-/**
- * -------------------------------------------------------------------------
- * DASHBOARD DE FROTA - VERSÃO FINAL (CACHE DINÂMICO POR DATA)
- * -------------------------------------------------------------------------
- */
 
-// 1. CONFIGURAÇÕES
-// -------------------------------------------------------------------------
+// --- CONSTANTES ---
 define('GOOGLE_SCRIPT_URL', 'https://script.google.com/macros/s/AKfycbxpJjRQ0KhIQtHA36CD_cugZyQD1GrftfIahwqxV9Nqxx1jnF5T2bt0tQgNM0kWfRArrQ/exec'); 
-
-define('CACHE_TIME', 60); // 60 segundos
-
-// 2. DATA E TIMEZONE
-// -------------------------------------------------------------------------
+define('CACHE_TIME', 60); 
 date_default_timezone_set('America/Sao_Paulo');
-$data_filtro = $_GET['data'] ?? date('d/m/Y'); 
 
-// --- LÓGICA DE CACHE DINÂMICO (CORREÇÃO AQUI) ---
-// Transforma "02/12/2025" em "cache_02-12-2025.json"
-// Isso impede que o cache de um dia apareça no outro
+$data_filtro = $_GET['data'] ?? date('d/m/Y'); 
 $nome_arquivo_cache = 'cache_frota_' . str_replace('/', '-', $data_filtro) . '.json';
 
-// Refresh Forçado (Apaga apenas o cache da data atual)
+// --- GARBAGE COLLECTOR ---
+if (rand(1, 100) === 1) {
+    $files = glob('cache_frota_*.json');
+    if ($files) {
+        $now = time();
+        foreach ($files as $file) { if ($now - filemtime($file) > 172800) @unlink($file); }
+    }
+}
+
 if (isset($_GET['force_refresh']) && $_GET['force_refresh'] == '1') {
     if (file_exists($nome_arquivo_cache)) @unlink($nome_arquivo_cache); 
 }
-// ------------------------------------------------
 
-// 3. FUNÇÃO DE LEITURA (JSON)
-// -------------------------------------------------------------------------
-function getDadosJson($scriptUrl, $data, $cacheFile, $cacheTime) {
-    // Verifica se o cache existe e é recente
-    if (!file_exists($cacheFile) || (time() - filemtime($cacheFile) > $cacheTime)) {
-        
-        $urlLoad = $scriptUrl . "?action=read&data=" . urlencode($data);
-        
-        // Contexto para evitar erros de bloqueio simples
-        $options = ["http" => ["method" => "GET", "header" => "User-Agent: PHP"]];
-        $context = stream_context_create($options);
-        
-        $json_content = @file_get_contents($urlLoad, false, $context);
-        
-        // Só salva se vier um JSON válido e não for erro
-        if ($json_content) {
-            $testDecode = json_decode($json_content, true);
-            if(is_array($testDecode) && !isset($testDecode['error'])) {
-                file_put_contents($cacheFile, $json_content);
-            }
+// --- HELPERS ---
+function h($str) { return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8'); }
+
+function getDadosJsonCurl($scriptUrl, $data, $cacheFile, $cacheTime) {
+    if (file_exists($cacheFile) && (time() - filemtime($cacheFile) < $cacheTime)) {
+        $conteudo = @file_get_contents($cacheFile);
+        if ($conteudo) return json_decode($conteudo, true);
+    }
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $scriptUrl . "?action=read&data=" . urlencode($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($httpCode == 200 && $response) {
+        $json = json_decode($response, true);
+        if (is_array($json) && !isset($json['error'])) {
+            file_put_contents($cacheFile, $response);
+            return $json;
         }
     }
-
-    if (!file_exists($cacheFile)) return [];
-
-    $json_data = file_get_contents($cacheFile);
-    $rows = json_decode($json_data, true); 
-
-    if (!is_array($rows) || isset($rows['error']) || empty($rows)) return [];
-
-    // Mapeamento de Colunas
-    // Linha 0 é o cabeçalho
-    $header = array_map('mb_strtolower', array_map('trim', $rows[0]));
-    
-    $findCol = function($keywords) use ($header) {
-        foreach ($header as $idx => $colName) {
-            foreach ($keywords as $key) {
-                if (strpos($colName, $key) !== false) return $idx;
-            }
-        }
-        return -1;
-    };
-
-    $idxEmpresa   = $findCol(['clientes']);
-    $idxRota      = $findCol(['rota', 'linha']);
-    $idxMotorista = $findCol(['motorista', 'condutor']);
-    $idxReserva   = $findCol(['reserva']); // Coluna Reserva
-    $idxEscala    = $findCol(['escala']); 
-    $idxEnviada   = $findCol(['enviada']); 
-    $idxProg      = $findCol(['ini']); 
-    $idxReal      = $findCol(['real', 'realizado']);
-    $idxObs       = $findCol(['observação', 'obs']);
-    $idxManut     = $findCol(['manutenção', 'manut', 'observação']);
-    $idxCarro     = $findCol(['aguardando', 'carro','observação']);
-    $idxRA        = $findCol(['ra', 'r.a', 'registro']); 
-
-    $dadosProcessados = [];
-    
-    // Função para garantir formato HH:mm
-    $limparHorario = function($val) {
-        if(empty($val)) return '';
-        return substr(trim($val), 0, 5); 
-    };
-
-    // Itera dados (começa do 1 para pular cabeçalho)
-    for ($i = 1; $i < count($rows); $i++) {
-        $r = $rows[$i];
-        if (empty($r[$idxEmpresa] ?? '') && empty($r[$idxRota] ?? '')) continue;
-
-        $valManut = $r[$idxManut] ?? '';
-        $valCarro = $r[$idxCarro] ?? '';
-
-        $dadosProcessados[] = [
-            'empresa'      => $r[$idxEmpresa] ?? '---',
-            'rota'         => $r[$idxRota] ?? '---',
-            'motorista'    => $r[$idxMotorista] ?? 'Não Definido',
-            'reserva'      => $r[$idxReserva] ?? '',
-            'frota_escala' => $r[$idxEscala] ?? '---',
-            'frota_enviada'=> $r[$idxEnviada] ?? '---',
-            'h_prog'       => $limparHorario($r[$idxProg] ?? ''), 
-            'h_real'       => $limparHorario($r[$idxReal] ?? ''),
-            'obs'          => $r[$idxObs] ?? '',       
-            'ra_val'       => $r[$idxRA] ?? '',        
-            'manutencao'   => (stripos($valManut, 'sim') !== false || stripos($valManut, 'manuten') !== false),
-            'aguardando'   => (stripos($valCarro, 'sim') !== false || stripos($valCarro, 'aguard') !== false),
-        ];
-    }
-    return $dadosProcessados;
+    if (file_exists($cacheFile)) return json_decode(file_get_contents($cacheFile), true);
+    return [];
 }
 
-// 4. EXECUÇÃO
-// Passamos o nome do arquivo dinâmico aqui
-$lista_dados = getDadosJson(GOOGLE_SCRIPT_URL, $data_filtro, $nome_arquivo_cache, CACHE_TIME);
+function processarDados($rows) {
+    if (!is_array($rows) || isset($rows['error']) || empty($rows)) return [];
+    $header = array_map('mb_strtolower', array_map('trim', $rows[0]));
+    $findCol = function($keywords) use ($header) {
+        foreach ($header as $idx => $colName) {
+            foreach ($keywords as $key) { if (strpos($colName, $key) !== false) return $idx; }
+        } return -1;
+    };
 
-// Ordenação por horário
+    $map = [
+        'empresa' => $findCol(['clientes']), 'rota' => $findCol(['rota', 'linha']),
+        'motorista' => $findCol(['motorista', 'condutor']), 'reserva' => $findCol(['reserva']),
+        'escala' => $findCol(['escala']), 'enviada' => $findCol(['enviada']),
+        'prog' => $findCol(['ini']), 'real' => $findCol(['real', 'realizado']),
+        'obs' => $findCol(['observação', 'obs']), 'manut' => $findCol(['manutenção', 'manut']),
+        'carro' => $findCol(['aguardando', 'carro']), 'ra' => $findCol(['ra', 'r.a', 'registro'])
+    ];
+
+    $dados = [];
+    $limparHorario = fn($val) => empty($val) ? '' : substr(trim($val), 0, 5);
+
+    for ($i = 1; $i < count($rows); $i++) {
+        $r = $rows[$i];
+        if (empty($r[$map['empresa']] ?? '') && empty($r[$map['rota']] ?? '')) continue;
+        
+        $empresa = isset($r[$map['empresa']]) ? trim($r[$map['empresa']]) : '---';
+        
+        // --- FILTRO DE BLOQUEIO (Aqui acontece a mágica) ---
+        // Converte para maiúsculo para garantir que pegue mesmo se escrever 'Viacao' ou 'VIACAO'
+        $empresaCheck = mb_strtoupper($empresa, 'UTF-8');
+        
+        // Lista de empresas ignoradas (Adicionei com e sem acento para garantir)
+        $empresasIgnoradas = [
+            'VIACAO MIMO VARZEA',
+            'VIAÇÃO MIMO VARZEA',
+            'VIACAO MIMO', // Caso queira bloquear a principal também
+            'VIAÇÃO MIMO'
+        ];
+
+        if (in_array($empresaCheck, $empresasIgnoradas)) {
+            continue; // PULA essa linha. Não conta no KPI, não aparece na tabela.
+        }
+        // ---------------------------------------------------
+
+        $valManut = $r[$map['manut']] ?? '';
+        $valCarro = $r[$map['carro']] ?? '';
+
+        $dados[] = [
+            'empresa' => $empresa,
+            'rota' => $r[$map['rota']] ?? '---',
+            'motorista' => $r[$map['motorista']] ?? 'Não Definido',
+            'reserva' => $r[$map['reserva']] ?? '',
+            'frota_escala' => $r[$map['escala']] ?? '---',
+            'frota_enviada' => $r[$map['enviada']] ?? '---',
+            'h_prog' => $limparHorario($r[$map['prog']] ?? ''),
+            'h_real' => $limparHorario($r[$map['real']] ?? ''),
+            'obs' => $r[$map['obs']] ?? '',
+            'ra_val' => $r[$map['ra']] ?? '',
+            'manutencao' => (stripos($valManut, 'sim') !== false || stripos($valManut, 'manuten') !== false),
+            'aguardando' => (stripos($valCarro, 'sim') !== false || stripos($valCarro, 'aguard') !== false),
+        ];
+    }
+    return $dados;
+}
+
+// --- CARGA DE DADOS ---
+$raw_data = getDadosJsonCurl(GOOGLE_SCRIPT_URL, $data_filtro, $nome_arquivo_cache, CACHE_TIME);
+$lista_dados = processarDados($raw_data);
+
+// Ordenação
 usort($lista_dados, function($a, $b) {
     if ($a['h_prog'] == $b['h_prog']) return 0;
     return ($a['h_prog'] < $b['h_prog']) ? -1 : 1;
 });
 
-// 5. CÁLCULO DE KPIS
-// -------------------------------------------------------------------------
-$kpi_total = count($lista_dados);
-$kpi_confirmados = 0; $kpi_pendentes = 0; $kpi_manutencao = 0; $kpi_aguardando = 0; $kpi_cobrir = 0;
+// Lista de Empresas para o Select
 $empresas_unicas = [];
-
-foreach ($lista_dados as $linha) {
-    if (!empty($linha['ra_val']) && trim($linha['ra_val']) !== '') $kpi_confirmados++; else $kpi_pendentes++;
-    if ($linha['manutencao']) $kpi_manutencao++;
-    if ($linha['aguardando']) $kpi_aguardando++;
-    if (stripos($linha['obs'], 'cobrir') !== false) $kpi_cobrir++;
-    if ($linha['empresa'] !== '---') $empresas_unicas[$linha['empresa']] = $linha['empresa'];
-}
+foreach ($lista_dados as $l) { if($l['empresa']!=='---') $empresas_unicas[$l['empresa']] = $l['empresa']; }
 asort($empresas_unicas);
-$filtro_empresa_sel = $_GET['empresa'] ?? '';
+
+// --- AJAX HANDLER ---
 if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
-    // 1. Buffering para capturar o HTML da tabela
-    ob_start();
-    if (empty($lista_dados)) {
-        echo '<tr><td colspan="6" class="text-center py-5 text-muted">Não foram encontrados dados.</td></tr>';
+    ob_clean(); header('Content-Type: application/json');
+    $currentHash = md5(json_encode($lista_dados));
+    $clientHash = $_GET['last_hash'] ?? '';
+
+    if ($clientHash === $currentHash) {
+        echo json_encode(['status' => 'no_change']);
     } else {
-        foreach ($lista_dados as $row) {
-            // (Mesma lógica de filtros e variáveis do HTML principal)
-            if ($filtro_empresa_sel && $row['empresa'] !== $filtro_empresa_sel) continue;
-
-            $divergencia = ($row['frota_escala'] != $row['frota_enviada']);
-            $realizou = (!empty($row['ra_val']) && trim($row['ra_val']) !== '');
-            $isManut = $row['manutencao'] ? 1 : 0;
-            $isAguard = $row['aguardando'] ? 1 : 0;
-            $isCobrir = (stripos($row['obs'], 'cobrir') !== false) ? 1 : 0;
-
-            $statusJS = 'pendente';
-            $statusHTML = '<span class="badge rounded-pill badge-status-pendente px-3">Aguardando</span>';
-
-            if ($row['manutencao']) {
-                $statusJS = 'manutencao';
-                $statusHTML = '<span class="badge rounded-pill badge-status-erro px-3">Manutenção</span>';
-            } elseif ($realizou) {
-                $statusJS = 'confirmado';
-                $statusHTML = '<span class="badge rounded-pill badge-status-ok px-3">Confirmado</span>';
-            }
-            
-            // Renderiza a TR (Cópia exata do seu layout)
-            ?>
-            <tr data-status-js="<?php echo $statusJS; ?>" data-is-manut="<?php echo $isManut; ?>" data-is-aguard="<?php echo $isAguard; ?>" data-is-cobrir="<?php echo $isCobrir; ?>">
-                <td>
-                    <div class="fw-bold text-dark"><?php echo $row['empresa']; ?></div>
-                    <div class="small text-muted text-truncate" style="max-width: 250px;"><?php echo $row['rota']; ?></div>
-                </td>
-                <td class="text-center">
-                    <div class="small text-muted"><?php echo $row['frota_escala']; ?> / <strong class="<?php echo $divergencia ? 'divergent-text' : ''; ?>"><?php echo $row['frota_enviada']; ?></strong></div>
-                </td>
-                <td>
-                    <div class="d-flex flex-column gap-1">
-                        <div class="d-flex align-items-center gap-2">
-                            <div class="bg-light rounded-circle p-2 text-secondary"><i class="bi bi-person-fill"></i></div>
-                            <span class="fw-medium small text-dark"><?php echo $row['motorista']; ?></span>
-                        </div>
-                        <?php if(!empty($row['reserva'])): ?>
-                            <div class="ms-4 small text-muted d-flex align-items-center gap-1">
-                                <i class="bi bi-arrow-return-right"></i> Res: <strong><?php echo $row['reserva']; ?></strong>
-                            </div>
-                        <?php endif; ?>
-                    </div>
-                </td>
-                <td>
-                    <div class="d-flex justify-content-between align-items-start">
-                        <div class="d-flex flex-column gap-1">
-                            <?php if($row['manutencao']): ?><span class="badge bg-danger bg-opacity-10 text-danger border border-danger py-1" style="font-size:0.7rem">Em Manutenção</span><?php endif; ?>
-                            <?php if($row['aguardando']): ?><span class="badge bg-warning bg-opacity-10 text-warning border border-warning py-1" style="font-size:0.7rem">Aguard. Carro</span><?php endif; ?>
-                            
-                            <?php if(!empty($row['obs'])): ?>
-                                <small class="text-secondary fst-italic" title="<?php echo $row['obs']; ?>">
-                                    <?php echo ($isCobrir ? '<strong class="text-purple">COBRIR</strong> ' : '') . mb_strimwidth($row['obs'], 0, 30, "..."); ?>
-                                </small>
-                            <?php endif; ?>
-
-                            <?php if($realizou): ?>
-                                <small class="text-success fw-bold" style="font-size: 0.75rem;">RA: <?php echo $row['ra_val']; ?></small>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                </td>
-                <td class="text-center"><?php echo $statusHTML; ?></td>
-                <td class="text-end">
-                    <div><small class="text-muted">Prog:</small> <strong><?php echo $row['h_prog']; ?></strong></div>
-                    <?php if(!empty($row['h_real']) && $row['h_real'] !== 'N/D'): ?><div><small class="text-muted">Real:</small> <?php echo $row['h_real']; ?></div><?php endif; ?>
-                </td>
-            </tr>
-            <?php
-        }
+        echo json_encode(['status' => 'updated', 'hash' => $currentHash, 'dados' => $lista_dados]);
     }
-    $htmlTabela = ob_get_clean();
-
-    // 2. Retorna JSON e mata a execução
-    header('Content-Type: application/json');
-    echo json_encode([
-        'kpis' => [
-            'total' => $kpi_total,
-            'confirmados' => $kpi_confirmados,
-            'pendentes' => $kpi_pendentes,
-            'manutencao' => $kpi_manutencao,
-            'aguardando' => $kpi_aguardando,
-            'cobrir' => $kpi_cobrir
-        ],
-        'html_tabela' => $htmlTabela,
-        'timestamp' => date('H:i:s')
-    ]);
-    exit; // Importante: para aqui e não carrega o resto da página HTML
+    exit;
 }
-
-// --- FIM DO BLOCO AJAX ---
 ?>
 <!DOCTYPE html>
 <html lang="pt-br">
@@ -267,166 +163,105 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
-        :root { --sidebar-bg: #0f172a; --sidebar-width: 260px; --sidebar-collapsed-width: 80px; --card-blue: #1e3a8a; --card-green: #10b981; --card-amber: #f59e0b; --alert-red: #dc2626; --alert-orange: #f97316; --alert-purple: #7e22ce; --bg-body: #f3f4f6; }
+        :root { --sidebar-bg: #0f172a; --sidebar-width: 260px; --card-blue: #1e3a8a; --card-green: #10b981; --card-amber: #f59e0b; --alert-red: #dc2626; --alert-orange: #f97316; --alert-purple: #7e22ce; }
         body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; overflow-x: hidden; }
-         .sidebar { 
-        background-color: #0b1f3a; 
-        color: white; 
-        min-height: 100vh; 
-        width: 250px; 
-        position: fixed; 
-        z-index: 1000; 
-        transition: all 0.3s ease; /* Transição suave */
-        overflow-y: auto;
-    }
-    .sidebar-header { padding: 1.5rem; font-size: 1.5rem; font-weight: 800; letter-spacing: 2px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 10px; }
-        .sidebar a { 
-        color: #d1d5db; 
-        display: flex; /* Flex para alinhar ícone e texto */
-        align-items: center;
-        padding: 14px 20px; 
-        text-decoration: none; 
-        border-left: 4px solid transparent; 
-        font-weight: 500; 
-        white-space: nowrap; /* Impede quebra de texto */
-        overflow: hidden;
-    }
-        .content.toggled { margin-left: var(--sidebar-collapsed-width); }
+        .sidebar { background-color: #0b1f3a; color: white; min-height: 100vh; width: 250px; position: fixed; z-index: 1000; transition: width 0.3s ease; overflow-y: auto; }
+        .sidebar a { color: #d1d5db; display: flex; align-items: center; padding: 14px 20px; text-decoration: none; border-left: 4px solid transparent; font-weight: 500; white-space: nowrap; overflow: hidden; }
+        .sidebar.toggled { width: 80px; }
+        .sidebar.toggled a span { display: none; } 
+        .sidebar.toggled a { justify-content: center; } 
+        .sidebar.toggled a i { margin-right: 0 !important; }
+        .sidebar a.active, .sidebar a:hover { background-color: #1b2e52; color: white; border-left-color: #0d6efd; }
+        .content { margin-left: 250px; padding: 30px; transition: margin-left 0.3s ease; }
+        .content.toggled { margin-left: 80px; }
         .top-header { background: white; padding: 1rem 2rem; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 900; }
-        .kpi-card { border-radius: 12px; padding: 1.5rem; color: white; text-align: center; height: 100%; display: flex; flex-direction: column; justify-content: center; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        
+        .kpi-card { border-radius: 12px; padding: 1.5rem; color: white; text-align: center; height: 100%; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
         .kpi-title { font-size: 0.75rem; text-transform: uppercase; font-weight: 700; opacity: 0.9; margin-bottom: 0.5rem; }
         .kpi-value { font-size: 2.5rem; font-weight: 800; line-height: 1; }
         .bg-mimo-blue { background-color: var(--card-blue); } .bg-mimo-green { background-color: var(--card-green); } .bg-mimo-amber { background-color: var(--card-amber); }
-        .kpi-alert-card { background: white; border-radius: 10px; padding: 1rem; display: flex; align-items: center; justify-content: space-between; border-left: 5px solid #ccc; box-shadow: 0 2px 4px rgba(0,0,0,0.05); transition: transform 0.2s; }
-        .kpi-alert-card:hover { transform: translateY(-2px); }
+        
+        .kpi-alert-card { background: white; border-radius: 10px; padding: 1rem; display: flex; align-items: center; justify-content: space-between; border-left: 5px solid #ccc; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         .alert-label { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; color: #64748b; }
         .alert-number { font-size: 1.8rem; font-weight: 800; color: #334155; }
-        .alert-icon { font-size: 1.5rem; opacity: 0.2; }
         .border-red { border-left-color: var(--alert-red); } .text-red { color: var(--alert-red); }
         .border-orange { border-left-color: var(--alert-orange); } .text-orange { color: var(--alert-orange); }
         .border-purple { border-left-color: var(--alert-purple); } .text-purple { color: var(--alert-purple); }
-        .card-table { background: white; border-radius: 12px; border: 1px solid #e5e7eb; box-shadow: 0 1px 3px rgba(0,0,0,0.05); overflow: hidden; }
+        
+        .card-table { background: white; border-radius: 12px; border: 1px solid #e5e7eb; overflow: hidden; }
         .table-custom thead th { background-color: #f8fafc; color: #64748b; font-size: 0.75rem; text-transform: uppercase; font-weight: 700; padding: 1rem; border-bottom: 1px solid #e2e8f0; }
         .table-custom tbody td { padding: 1rem; vertical-align: middle; color: #334155; font-size: 0.875rem; border-bottom: 1px solid #f1f5f9; }
+        
         .badge-status-pendente { background-color: #fef3c7; color: #b45309; border: 1px solid #fcd34d; }
         .badge-status-ok { background-color: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
         .badge-status-erro { background-color: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
         .divergent-text { color: #dc2626; font-weight: 700; text-decoration: underline; }
+        
         .search-input { border-radius: 20px; background: #f8fafc; border: 1px solid #cbd5e1; padding: 5px 15px 5px 35px; width: 250px; }
         .search-wrapper { position: relative; }
         .search-wrapper i { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #94a3b8; }
-        .btn-edit-obs { cursor: pointer; color: #64748b; transition: color 0.2s; }
-        .btn-edit-obs:hover { color: #2563eb; }
-        /* --- CONTEÚDO --- */
-    .content { 
-        margin-left: 250px; 
-        padding: 30px; 
-        transition: all 0.3s ease; 
-    }
-    .content.toggled { margin-left: 80px; } /* Ajusta margem quando fechado */
-        /* Imagem do Logo */
-    .sidebar .logo-container img { transition: all 0.3s; max-width: 160px; }
-
-    /* --- ESTADO RETRAÍDO (TOGGLED) --- */
-    .sidebar.toggled { width: 80px; }
-    .sidebar.toggled .logo-container img { max-width: 50px; } /* Diminui logo */
-    .sidebar.toggled a span { display: none; } /* Esconde o texto */
-    .sidebar.toggled a { justify-content: center; padding: 14px 0; } /* Centraliza ícones */
-    .sidebar.toggled a i { margin-right: 0 !important; }
-    .sidebar a i { min-width: 30px; font-size: 1.1rem; } /* Largura fixa para o ícone */
-     .sidebar a.active, .sidebar a:hover { background-color: #1b2e52; color: white; border-left-color: #0d6efd; }
+        
+        .progress-container { height: 4px; width: 100%; background-color: #f1f5f9; position: relative; }
+        .progress-bar-custom { height: 100%; background-color: #10b981; width: 100%; transition: width 1s linear; }
+        .d-none-filter { display: none !important; }
     </style>
 </head>
 <body>
 
 <div class="sidebar d-flex flex-column" id="sidebar">
     <div class="text-center py-4 bg-dark bg-opacity-25 logo-container">
-        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo">
+        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo" style="max-width: 160px; transition: all 0.3s;">
     </div>
-
-    <?php 
-    // --- GERAÇÃO DOS LINKS ---
-    foreach ($menu_itens as $chave => $item): 
-        // Lógica de Exibição:
-        // 1. Se for admin: MOSTRA TUDO
-        // 2. Se não for admin: MOSTRA SÓ SE A CHAVE ESTIVER NA LISTA DE PERMISSÕES
-        $is_admin = ($_SESSION['user_role'] ?? '') === 'admin';
-        $tem_permissao = in_array($chave, $permissoes_usuario);
-
-        if ($is_admin || $tem_permissao):
-            // Lógica para marcar o link como "active" (Ex: se o arquivo atual for o link do menu)
-            // No seu exemplo manual, 'Escala' estava fixo como active. Aqui tentamos detectar.
-            // Se preferir fixo, remova essa linha e coloque a classe manualmente na lógica.
-            $classe_active = ($pagina_atual == $item['link'] || ($chave == 'escala' && $pagina_atual == 'escala.php')) ? 'active' : '';
-    ?>
-        <a href="<?php echo $item['link']; ?>" class="<?php echo $classe_active; ?>" title="<?php echo $item['label']; ?>">
-            <i class="bi <?php echo $item['icon']; ?> me-2"></i>
-            <span><?php echo $item['label']; ?></span>
+    <?php foreach ($menu_itens as $chave => $item): 
+        if ((($_SESSION['user_role'] ?? '') === 'admin') || in_array($chave, $permissoes_usuario)): ?>
+        <a href="<?php echo $item['link']; ?>" class="<?php echo ($pagina_atual == $item['link']) ? 'active' : ''; ?>">
+            <i class="bi <?php echo $item['icon']; ?> me-2"></i><span><?php echo $item['label']; ?></span>
         </a>
-    <?php 
-        endif; 
-    endforeach; 
-    ?>
-
-    <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
-        <a href="admin.php" title="Usuários" class="<?php echo ($pagina_atual == 'admin.php') ? 'active' : ''; ?>">
-            <i class="bi bi-people-fill me-2"></i><span>Usuários</span>
-        </a>
-    <?php endif; ?>
-
-    <a href="logout.php" class="mt-auto text-danger border-top border-secondary" title="Sair">
-        <i class="bi bi-box-arrow-right me-2"></i><span>Sair</span>
-    </a>
+    <?php endif; endforeach; ?>
+    <a href="logout.php" class="mt-auto text-danger border-top border-secondary"><i class="bi bi-box-arrow-right me-2"></i><span>Sair</span></a>
 </div>
 
 <div class="content" id="content">
     <header class="top-header">
         <div class="d-flex align-items-center gap-3">
             <button class="btn btn-light btn-sm shadow-sm" id="btnToggle"><i class="bi bi-list fs-5"></i></button>
-            <div>
-                <h5 class="mb-0 fw-bold text-dark">Visão Geral das Linhas</h5>
-                <small class="text-muted">Filtro de Data: <strong><?php echo $data_filtro; ?></strong></small>
-            </div>
+            <div><h5 class="mb-0 fw-bold text-dark">Visão Geral das Linhas</h5><small class="text-muted">Data: <strong><?php echo h($data_filtro); ?></strong></small></div>
         </div>
         <div class="d-flex align-items-center gap-3">
             <form method="GET" class="d-flex gap-2">
-                <input type="text" name="data" class="form-control form-control-sm" value="<?php echo $data_filtro; ?>" style="width: 120px;" placeholder="dd/mm/aaaa">
+                <input type="text" name="data" class="form-control form-control-sm" value="<?php echo h($data_filtro); ?>" style="width: 120px;" placeholder="dd/mm/aaaa">
                 <button class="btn btn-dark btn-sm">Ir</button>
             </form>
-            <div class="search-wrapper">
-                <i class="bi bi-search"></i>
-                <input type="text" id="searchInput" class="search-input" placeholder="Buscar na tela...">
-            </div>
+            <div class="search-wrapper"><i class="bi bi-search"></i><input type="text" id="searchInput" class="search-input" placeholder="Buscar na tela..."></div>
         </div>
     </header>
 
     <div class="p-4">
         <div class="row g-4 mb-3">
-            <div class="col-md-4"><div class="kpi-card bg-mimo-blue"><div class="kpi-title">Total de Linhas</div><div class="kpi-value" id="count-total"><?php echo $kpi_total; ?></div></div></div>
-            <div class="col-md-4"><div class="kpi-card bg-mimo-green"><div class="kpi-title">Confirmadas (RA)</div><div class="kpi-value" id="count-confirmadas"><?php echo $kpi_confirmados; ?></div></div></div>
-            <div class="col-md-4"><div class="kpi-card bg-mimo-amber"><div class="kpi-title">Pendentes</div><div class="kpi-value" id="count-pendentes"><?php echo $kpi_pendentes; ?></div></div></div>
+            <div class="col-md-4"><div class="kpi-card bg-mimo-blue"><div class="kpi-title">Total de Linhas</div><div class="kpi-value" id="kpi-total">0</div></div></div>
+            <div class="col-md-4"><div class="kpi-card bg-mimo-green"><div class="kpi-title">Confirmadas (RA)</div><div class="kpi-value" id="kpi-confirmadas">0</div></div></div>
+            <div class="col-md-4"><div class="kpi-card bg-mimo-amber"><div class="kpi-title">Pendentes</div><div class="kpi-value" id="kpi-pendentes">0</div></div></div>
         </div>
         <div class="row g-3 mb-4">
-            <div class="col-md-4"><div class="kpi-alert-card border-red"><div><div class="alert-label text-red">Em Manutenção</div><div class="alert-number text-red" id="count-manutencao"><?php echo $kpi_manutencao; ?></div></div><div class="alert-icon text-red"><i class="bi bi-wrench"></i></div></div></div>
-            <div class="col-md-4"><div class="kpi-alert-card border-orange"><div><div class="alert-label text-orange">Aguardando Carro</div><div class="alert-number text-orange" id="count-aguardando"><?php echo $kpi_aguardando; ?></div></div><div class="alert-icon text-orange"><i class="bi bi-cone-striped"></i></div></div></div>
-            <div class="col-md-4"><div class="kpi-alert-card border-purple"><div><div class="alert-label text-purple">Cobrir</div><div class="alert-number text-purple" id="count-cobrir"><?php echo $kpi_cobrir; ?></div></div><div class="alert-icon text-purple"><i class="bi bi-exclamation-triangle-fill"></i></div></div></div>
+            <div class="col-md-4"><div class="kpi-alert-card border-red"><div><div class="alert-label text-red">Em Manutenção</div><div class="alert-number text-red" id="kpi-manutencao">0</div></div><div class="alert-icon text-red"><i class="bi bi-wrench"></i></div></div></div>
+            <div class="col-md-4"><div class="kpi-alert-card border-orange"><div><div class="alert-label text-orange">Aguardando Carro</div><div class="alert-number text-orange" id="kpi-aguardando">0</div></div><div class="alert-icon text-orange"><i class="bi bi-cone-striped"></i></div></div></div>
+            <div class="col-md-4"><div class="kpi-alert-card border-purple"><div><div class="alert-label text-purple">Cobrir</div><div class="alert-number text-purple" id="kpi-cobrir">0</div></div><div class="alert-icon text-purple"><i class="bi bi-exclamation-triangle-fill"></i></div></div></div>
         </div>
 
         <div class="bg-white p-3 rounded shadow-sm border mb-4">
-            <form method="GET" class="row g-3 align-items-end">
-                <input type="hidden" name="data" value="<?php echo $data_filtro; ?>">
+            <div class="row g-3 align-items-end">
                 <div class="col-md-3">
                     <label class="form-label small fw-bold text-secondary mb-1">Empresa</label>
-                    <select name="empresa" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <select id="filtroEmpresa" class="form-select form-select-sm">
                         <option value="">Todas</option>
                         <?php foreach ($empresas_unicas as $emp): ?>
-                            <option value="<?php echo $emp; ?>" <?php echo ($filtro_empresa_sel == $emp) ? 'selected' : ''; ?>><?php echo $emp; ?></option>
+                            <option value="<?php echo h($emp); ?>"><?php echo h($emp); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div class="col-md-3">
                     <label class="form-label small fw-bold text-secondary mb-1">Status (Visual)</label>
-                    <select id="filtroStatusJS" class="form-select form-select-sm" onchange="saveAndApply()">
+                    <select id="filtroStatus" class="form-select form-select-sm">
                         <option value="">Todos</option>
                         <option value="pendente">Aguardando</option>
                         <option value="confirmado">Confirmado</option>
@@ -434,14 +269,15 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
                         <option value="cobrir">Cobrir</option>
                     </select>
                 </div>
-            </form>
+            </div>
         </div>
 
-        <div class="card-table">
+        <div class="card-table" id="cardTable">
             <div class="p-3 border-bottom bg-white d-flex justify-content-between align-items-center">
                 <h6 class="mb-0 fw-bold text-dark">Operação</h6>
-                <span class="badge bg-light text-dark border">Atualiza em <span id="timer-display">60</span>s</span>
+                <small class="text-muted"><i class="bi bi-clock-history"></i> Auto-update</small>
             </div>
+            <div class="progress-container"><div class="progress-bar-custom" id="progressBar"></div></div>
             <div class="table-responsive">
                 <table class="table table-custom mb-0 w-100">
                     <thead>
@@ -455,75 +291,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
                         </tr>
                     </thead>
                     <tbody id="tabela-veiculos">
-                        <?php if (empty($lista_dados)): ?>
-                             <tr><td colspan="6" class="text-center py-5 text-muted">Não foram encontrados dados para <?php echo $data_filtro; ?>.</td></tr>
-                        <?php else:
-                            foreach ($lista_dados as $row):
-                                if ($filtro_empresa_sel && $row['empresa'] !== $filtro_empresa_sel) continue;
-
-                                $divergencia = ($row['frota_escala'] != $row['frota_enviada']);
-                                $realizou = (!empty($row['ra_val']) && trim($row['ra_val']) !== '');
-                                $isManut = $row['manutencao'] ? 1 : 0;
-                                $isAguard = $row['aguardando'] ? 1 : 0;
-                                $isCobrir = (stripos($row['obs'], 'cobrir') !== false) ? 1 : 0;
-
-                                $statusJS = 'pendente';
-                                $statusHTML = '<span class="badge rounded-pill badge-status-pendente px-3">Aguardando</span>';
-
-                                if ($row['manutencao']) {
-                                    $statusJS = 'manutencao';
-                                    $statusHTML = '<span class="badge rounded-pill badge-status-erro px-3">Manutenção</span>';
-                                } elseif ($realizou) {
-                                    $statusJS = 'confirmado';
-                                    $statusHTML = '<span class="badge rounded-pill badge-status-ok px-3">Confirmado</span>';
-                                }
-                        ?>
-                        <tr data-status-js="<?php echo $statusJS; ?>" data-is-manut="<?php echo $isManut; ?>" data-is-aguard="<?php echo $isAguard; ?>" data-is-cobrir="<?php echo $isCobrir; ?>">
-                            <td>
-                                <div class="fw-bold text-dark"><?php echo $row['empresa']; ?></div>
-                                <div class="small text-muted text-truncate" style="max-width: 250px;"><?php echo $row['rota']; ?></div>
-                            </td>
-                            <td class="text-center">
-                                <div class="small text-muted"><?php echo $row['frota_escala']; ?> / <strong class="<?php echo $divergencia ? 'divergent-text' : ''; ?>"><?php echo $row['frota_enviada']; ?></strong></div>
-                            </td>
-                            <td>
-                                <div class="d-flex flex-column gap-1">
-                                    <div class="d-flex align-items-center gap-2">
-                                        <div class="bg-light rounded-circle p-2 text-secondary"><i class="bi bi-person-fill"></i></div>
-                                        <span class="fw-medium small text-dark"><?php echo $row['motorista']; ?></span>
-                                    </div>
-                                    <?php if(!empty($row['reserva'])): ?>
-                                        <div class="ms-4 small text-muted d-flex align-items-center gap-1">
-                                            <i class="bi bi-arrow-return-right"></i> Res: <strong><?php echo $row['reserva']; ?></strong>
-                                        </div>
-                                    <?php endif; ?>
-                                </div>
-                            </td>
-                            <td>
-                                <div class="d-flex justify-content-between align-items-start">
-                                    <div class="d-flex flex-column gap-1">
-                                        <?php if($row['manutencao']): ?><span class="badge bg-danger bg-opacity-10 text-danger border border-danger py-1" style="font-size:0.7rem">Em Manutenção</span><?php endif; ?>
-                                        <?php if($row['aguardando']): ?><span class="badge bg-warning bg-opacity-10 text-warning border border-warning py-1" style="font-size:0.7rem">Aguard. Carro</span><?php endif; ?>
-                                        
-                                        <?php if(!empty($row['obs'])): ?>
-                                            <small class="text-secondary fst-italic" title="<?php echo $row['obs']; ?>">
-                                                <?php echo ($isCobrir ? '<strong class="text-purple">COBRIR</strong> ' : '') . mb_strimwidth($row['obs'], 0, 30, "..."); ?>
-                                            </small>
-                                        <?php endif; ?>
-
-                                        <?php if($realizou): ?>
-                                            <small class="text-success fw-bold" style="font-size: 0.75rem;">RA: <?php echo $row['ra_val']; ?></small>
-                                        <?php endif; ?>
-                                    </div>
-                                </div>
-                            </td>
-                            <td class="text-center"><?php echo $statusHTML; ?></td>
-                            <td class="text-end">
-                                <div><small class="text-muted">Prog:</small> <strong><?php echo $row['h_prog']; ?></strong></div>
-                                <?php if(!empty($row['h_real']) && $row['h_real'] !== 'N/D'): ?><div><small class="text-muted">Real:</small> <?php echo $row['h_real']; ?></div><?php endif; ?>
-                            </td>
-                        </tr>
-                        <?php endforeach; endif; ?>
+                        <tr><td colspan="6" class="text-center py-5"><div class="spinner-border text-primary" role="status"></div><div class="mt-2 text-muted">Carregando dados...</div></td></tr>
                     </tbody>
                 </table>
             </div>
@@ -533,164 +301,169 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-    // ELEMENTOS DO DOM
-    const btnToggle = document.getElementById('btnToggle');
-    const sidebar = document.getElementById('sidebar');
-    const content = document.getElementById('content');
-    const searchInput = document.getElementById('searchInput');
-    const filtroStatus = document.getElementById('filtroStatusJS');
-    const timerDisplay = document.getElementById('timer-display');
-    const tabelaBody = document.getElementById('tabela-veiculos');
+    // --- ESTADO GLOBAL ---
+    let DADOS_GLOBAIS = <?php echo json_encode($lista_dados); ?>; 
+    let currentHash = '<?php echo md5(json_encode($lista_dados)); ?>';
+    let timeLeft = 60;
+    let filterTimeout;
 
-    // --- 1. LÓGICA DO MENU (COM MEMÓRIA) ---
-    const menuState = localStorage.getItem('mimo_menu_state');
-    if (menuState === 'closed') {
-        sidebar.classList.add('toggled');
-        content.classList.add('toggled');
+    // Elementos
+    const els = {
+        tbody: document.getElementById('tabela-veiculos'),
+        search: document.getElementById('searchInput'),
+        empresa: document.getElementById('filtroEmpresa'),
+        status: document.getElementById('filtroStatus'),
+        progress: document.getElementById('progressBar'),
+        card: document.getElementById('cardTable'),
+        kpis: {
+            total: document.getElementById('kpi-total'),
+            confirmados: document.getElementById('kpi-confirmadas'),
+            pendentes: document.getElementById('kpi-pendentes'),
+            manutencao: document.getElementById('kpi-manutencao'),
+            aguardando: document.getElementById('kpi-aguardando'),
+            cobrir: document.getElementById('kpi-cobrir')
+        }
+    };
+
+    // --- FUNÇÃO DE RENDERIZAÇÃO (Filtros no JS) ---
+    function renderizarApp() {
+        const empresaSel = els.empresa.value;
+        const statusSel = els.status.value;
+        const termo = els.search.value.toLowerCase();
+        
+        let html = '';
+        let kpi = { total:0, confirmados:0, pendentes:0, manutencao:0, aguardando:0, cobrir:0 };
+        const safe = (s) => s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
+
+        DADOS_GLOBAIS.forEach(row => {
+            // Filtros
+            if (empresaSel && row.empresa !== empresaSel) return;
+            
+            const obsTexto = (row.obs || '').toString();
+            const realizou = (row.ra_val && String(row.ra_val).trim() !== '');
+            const isCobrir = obsTexto.toLowerCase().includes('cobrir');
+            
+            let statusKey = 'pendente';
+            if (row.manutencao) statusKey = 'manutencao';
+            else if (realizou) statusKey = 'confirmado';
+            
+            if (statusSel) {
+                if (statusSel === 'cobrir') { if (!isCobrir) return; }
+                else if (statusSel !== statusKey) return;
+            }
+
+            const searchText = `${row.empresa} ${row.rota} ${row.motorista} ${row.frota_escala} ${row.frota_enviada} ${obsTexto} ${row.ra_val}`.toLowerCase();
+            if (termo && !searchText.includes(termo)) return;
+
+            // KPIs
+            kpi.total++;
+            if (statusKey === 'confirmado') kpi.confirmados++;
+            else if (statusKey === 'pendente' && !row.manutencao) kpi.pendentes++;
+            
+            if (row.manutencao) kpi.manutencao++;
+            if (row.aguardando) kpi.aguardando++;
+            if (isCobrir) kpi.cobrir++;
+
+            // HTML
+            const divergencia = (row.frota_escala != row.frota_enviada);
+            const obsDisplay = safe(obsTexto.length > 30 ? obsTexto.substring(0, 30) + '...' : obsTexto);
+            
+            let badgeHtml = '<span class="badge rounded-pill badge-status-pendente px-3">Aguardando</span>';
+            if (statusKey === 'manutencao') badgeHtml = '<span class="badge rounded-pill badge-status-erro px-3">Manutenção</span>';
+            else if (statusKey === 'confirmado') badgeHtml = '<span class="badge rounded-pill badge-status-ok px-3">Confirmado</span>';
+
+            html += `
+            <tr>
+                <td><div class="fw-bold text-dark">${safe(row.empresa)}</div><div class="small text-muted text-truncate" style="max-width:250px">${safe(row.rota)}</div></td>
+                <td class="text-center"><div class="small text-muted">${safe(row.frota_escala)} / <strong class="${divergencia ? 'divergent-text' : ''}">${safe(row.frota_enviada)}</strong></div></td>
+                <td>
+                    <div class="d-flex flex-column gap-1">
+                        <div class="d-flex align-items-center gap-2"><div class="bg-light rounded-circle p-2 text-secondary"><i class="bi bi-person-fill"></i></div><span class="fw-medium small text-dark">${safe(row.motorista)}</span></div>
+                        ${row.reserva ? `<div class="ms-4 small text-muted"><i class="bi bi-arrow-return-right"></i> Res: <strong>${safe(row.reserva)}</strong></div>` : ''}
+                    </div>
+                </td>
+                <td>
+                    <div class="d-flex flex-column gap-1">
+                        ${row.manutencao ? '<span class="badge bg-danger bg-opacity-10 text-danger border border-danger py-1" style="font-size:0.7rem">Em Manutenção</span>' : ''}
+                        ${row.aguardando ? '<span class="badge bg-warning bg-opacity-10 text-warning border border-warning py-1" style="font-size:0.7rem">Aguard. Carro</span>' : ''}
+                        ${obsTexto ? `<small class="text-secondary fst-italic" title="${safe(obsTexto)}">${isCobrir ? '<strong class="text-purple">COBRIR</strong> ' : ''}${obsDisplay}</small>` : ''}
+                        ${realizou ? `<small class="text-success fw-bold" style="font-size:0.75rem">RA: ${safe(row.ra_val)}</small>` : ''}
+                    </div>
+                </td>
+                <td class="text-center">${badgeHtml}</td>
+                <td class="text-end"><div><small class="text-muted">Prog:</small> <strong>${safe(row.h_prog)}</strong></div>${(row.h_real && row.h_real!=='N/D') ? `<div><small class="text-muted">Real:</small> ${safe(row.h_real)}</div>` : ''}</td>
+            </tr>`;
+        });
+
+        if (html === '') html = '<tr><td colspan="6" class="text-center py-5 text-muted">Nenhum registro encontrado com esses filtros.</td></tr>';
+        
+        const scrollPos = window.scrollY;
+        els.tbody.innerHTML = html;
+        window.scrollTo(0, scrollPos);
+
+        els.kpis.total.innerText = kpi.total;
+        els.kpis.confirmados.innerText = kpi.confirmados;
+        els.kpis.pendentes.innerText = kpi.pendentes;
+        els.kpis.manutencao.innerText = kpi.manutencao;
+        els.kpis.aguardando.innerText = kpi.aguardando;
+        els.kpis.cobrir.innerText = kpi.cobrir;
     }
 
-    btnToggle.addEventListener('click', () => { 
-        sidebar.classList.toggle('toggled'); 
-        content.classList.toggle('toggled'); 
-        localStorage.setItem('mimo_menu_state', sidebar.classList.contains('toggled') ? 'closed' : 'open');
-    });
+    function aplicarFiltros() {
+        renderizarApp();
+        localStorage.setItem('mimo_empresa', els.empresa.value);
+        localStorage.setItem('mimo_status', els.status.value);
+        localStorage.setItem('mimo_search', els.search.value);
+    }
 
-    // --- 2. ATUALIZAÇÃO VIA AJAX (SEM REFRESH) ---
-    let timeLeft = 60;
-    
-    // Função principal de atualização
+    els.empresa.addEventListener('change', aplicarFiltros);
+    els.status.addEventListener('change', aplicarFiltros);
+    els.search.addEventListener('keyup', () => { clearTimeout(filterTimeout); filterTimeout = setTimeout(aplicarFiltros, 300); });
+
     function atualizarDados() {
         const urlParams = new URLSearchParams(window.location.search);
-        const dataAtual = urlParams.get('data') || '<?php echo $data_filtro; ?>';
-        const empresaAtual = urlParams.get('empresa') || '';
+        const dataAtual = urlParams.get('data') || '<?php echo h($data_filtro); ?>';
         
-        // Adiciona parâmetro ajax=1
-        const urlFetch = window.location.pathname + `?ajax=1&data=${dataAtual}&empresa=${empresaAtual}`;
-
-        // Mostra loading suave no timer
-        if(timerDisplay) timerDisplay.innerText = "...";
-
-        fetch(urlFetch)
-            .then(response => response.json())
+        fetch(window.location.pathname + `?ajax=1&data=${encodeURIComponent(dataAtual)}&last_hash=${currentHash}`)
+            .then(r => r.json())
             .then(data => {
-                // 1. Atualiza KPIs
-                if(data.kpis) {
-                    safeUpdate('count-total', data.kpis.total);
-                    safeUpdate('count-confirmadas', data.kpis.confirmados);
-                    safeUpdate('count-pendentes', data.kpis.pendentes);
-                    safeUpdate('count-manutencao', data.kpis.manutencao);
-                    safeUpdate('count-aguardando', data.kpis.aguardando);
-                    safeUpdate('count-cobrir', data.kpis.cobrir);
+                if (data.status === 'updated') {
+                    DADOS_GLOBAIS = data.dados;
+                    currentHash = data.hash;
+                    renderizarApp();
+                    els.card.classList.add('table-updated');
+                    setTimeout(()=>els.card.classList.remove('table-updated'), 500);
                 }
-
-                // 2. Atualiza Tabela
-                if(data.html_tabela && tabelaBody) {
-                    tabelaBody.innerHTML = data.html_tabela;
-                }
-
-                // 3. Re-aplica filtros de busca (importante!)
-                aplicarFiltrosJS();
-                
-                // 4. Reinicia Timer
                 timeLeft = 60;
-                console.log("Dados atualizados em: " + data.timestamp);
+                els.progress.style.width = "100%";
             })
-            .catch(err => {
-                console.error("Erro na atualização:", err);
-                timerDisplay.innerText = "Erro";
-            });
+            .catch(e => { timeLeft = 60; console.error(e); });
     }
 
-    // Helper para atualizar texto se o elemento existir
-    function safeUpdate(id, val) {
-        const el = document.getElementById(id);
-        if(el) el.innerText = val;
-    }
-
-    // Timer Regressivo
     setInterval(() => {
         if(timeLeft > 0) {
             timeLeft--;
-            if(timerDisplay) timerDisplay.innerText = timeLeft;
+            els.progress.style.width = ((timeLeft/60)*100) + "%";
+            els.progress.style.backgroundColor = timeLeft < 10 ? "#dc2626" : "#10b981";
         } else {
-            // Quando chega a 0, chama a função AJAX em vez de reload
             atualizarDados();
         }
     }, 1000);
 
-    // --- 3. FILTROS DA TABELA ---
-   // --- 3. FILTROS DA TABELA (ATUALIZADO) ---
-function aplicarFiltrosJS() {
-    const termo = searchInput.value.toLowerCase();
-    const statusVal = filtroStatus.value;
-    
-    // Pega as linhas
-    const rows = document.querySelectorAll('#tabela-veiculos tr');
-
-    rows.forEach(row => {
-        const txt = row.innerText.toLowerCase();
-        
-        // Pega os atributos da linha
-        const st = row.getAttribute('data-status-js'); 
-        const isCobrir = row.getAttribute('data-is-cobrir') === '1';
-
-        // Lógica de verificação do status
-        let statusMatch = false;
-
-        if (statusVal === '') {
-            // Se for "Todos", aceita qualquer coisa
-            statusMatch = true;
-        } else if (statusVal === 'cobrir') {
-            // Se o filtro for "Cobrir", verifica apenas a flag de cobrir
-            statusMatch = isCobrir;
-        } else {
-            // Para os outros (pendente, confirmado, manutencao), verifica o status padrão
-            statusMatch = (st === statusVal);
-        }
-        
-        // Aplica o display (precisa bater o texto E o status)
-        if(txt.includes(termo) && statusMatch) {
-            row.style.display = '';
-        } else { 
-            row.style.display = 'none'; 
-        }
-    });
-}
-
-    function saveAndApply() {
-        localStorage.setItem('mimo_frota_search', searchInput.value);
-        localStorage.setItem('mimo_frota_status', filtroStatus.value);
-        aplicarFiltrosJS();
-    }
-    
-    searchInput.addEventListener('keyup', saveAndApply);
-    filtroStatus.addEventListener('change', saveAndApply);
-    
-    // --- 4. INICIALIZAÇÃO ---
-    document.addEventListener('DOMContentLoaded', () => {
-        const savedSearch = localStorage.getItem('mimo_frota_search');
-        const savedStatus = localStorage.getItem('mimo_frota_status');
-        if (savedSearch) searchInput.value = savedSearch;
-        if (savedStatus) filtroStatus.value = savedStatus;
-        aplicarFiltrosJS();
+    const btnToggle = document.getElementById('btnToggle');
+    const sidebar = document.getElementById('sidebar');
+    const content = document.getElementById('content');
+    if(localStorage.getItem('mimo_menu_state') === 'closed') { sidebar.classList.add('toggled'); content.classList.add('toggled'); }
+    if(btnToggle) btnToggle.addEventListener('click', () => {
+        sidebar.classList.toggle('toggled'); content.classList.toggle('toggled');
+        localStorage.setItem('mimo_menu_state', sidebar.classList.contains('toggled')?'closed':'open');
     });
 
-    // --- 5. EDIÇÃO (Reutiliza lógica de refresh forçado na página se editar) ---
-    function editarObs(empresa, rota, obsAtual, dataFiltro) {
-        const scriptUrl = "<?php echo (defined('GOOGLE_SCRIPT_URL') && GOOGLE_SCRIPT_URL != 'COLE_A_URL_DO_GOOGLE_SCRIPT_AQUI') ? GOOGLE_SCRIPT_URL : ''; ?>";
-        if (!scriptUrl) return;
+    if(localStorage.getItem('mimo_empresa')) els.empresa.value = localStorage.getItem('mimo_empresa');
+    if(localStorage.getItem('mimo_status')) els.status.value = localStorage.getItem('mimo_status');
+    if(localStorage.getItem('mimo_search')) els.search.value = localStorage.getItem('mimo_search');
 
-        const novaObs = prompt("Editar OBS (" + rota + "):", obsAtual);
-        if (novaObs !== null && novaObs !== obsAtual) {
-            document.body.style.cursor = 'wait';
-            const urlCompleta = scriptUrl + "?action=edit" + "&empresa=" + encodeURIComponent(empresa) + "&rota=" + encodeURIComponent(rota) + "&obs=" + encodeURIComponent(novaObs) + "&data=" + encodeURIComponent(dataFiltro);
-
-            fetch(urlCompleta).then(r => r.text()).then(d => {
-                // Após editar, força uma atualização AJAX imediata
-                atualizarDados(); 
-            }).finally(() => { document.body.style.cursor = 'default'; });
-        }
-    }
+    renderizarApp();
 </script>
 </body>
 </html>
