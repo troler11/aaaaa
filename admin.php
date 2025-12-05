@@ -4,13 +4,14 @@ session_start();
 
 // Carrega configurações e conexão com BD ($pdo)
 require_once 'config.php'; 
+require_once 'menus.php'; 
 
 // --- 1. SEGURANÇA ---
 if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true) {
     header("Location: login.php");
     exit;
 }
-
+verificarPermissaoPagina('usuarios');
 if (($_SESSION['user_role'] ?? '') !== 'admin') {
     header("Location: /");
     exit;
@@ -23,7 +24,8 @@ $sistema_menus = [
     'veiculos'   => ['label' => 'Veículos',   'icon' => 'bi-bus-front',    'link' => '#'],
     'motoristas' => ['label' => 'Motoristas', 'icon' => 'bi-person-vcard', 'link' => '#'],
     'escala'     => ['label' => 'Escala',     'icon' => 'bi-calendar-week', 'link' => 'escala.php'],
-    'relatorios' => ['label' => 'Relatórios', 'icon' => 'bi-file-earmark-text', 'link' => 'relatorio.php']
+    'relatorios' => ['label' => 'Relatórios', 'icon' => 'bi-file-earmark-text', 'link' => 'relatorio.php'],
+    'usuarios' => ['label' => 'Usuários', 'icon' => 'bi-people-fill me-2', 'link' => 'admin.php']
 ];
 
 // [NOVO] LISTA DE EMPRESAS DISPONÍVEIS
@@ -177,19 +179,20 @@ $usuarios = $pdo->query("SELECT * FROM users ORDER BY full_name ASC")->fetchAll(
     <div class="text-center py-4 bg-dark bg-opacity-25 logo-container">
         <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo">
     </div>
-
-    <?php foreach ($sistema_menus as $key => $menu): ?>
-        <a href="<?php echo $menu['link']; ?>" title="<?php echo $menu['label']; ?>">
-            <i class="bi <?php echo $menu['icon']; ?> me-2"></i>
-            <span><?php echo $menu['label']; ?></span>
+    <?php 
+    foreach ($menu_itens as $chave => $item): 
+        $is_admin = ($_SESSION['user_role'] ?? '') === 'admin';
+        $tem_permissao = in_array($chave, $permissoes_usuario);
+        if ($is_admin || $tem_permissao):
+            $classe_active = ($pagina_atual == $item['link'] || ($chave == 'escala' && $pagina_atual == 'escala.php')) ? 'active' : '';
+    ?>
+        <a href="<?php echo $item['link']; ?>" class="<?php echo $classe_active; ?>" title="<?php echo $item['label']; ?>">
+            <i class="bi <?php echo $item['icon']; ?> me-2"></i><span><?php echo $item['label']; ?></span>
         </a>
-    <?php endforeach; ?>
-
-    <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
-        <a href="admin.php" class="active" title="Usuários"><i class="bi bi-people-fill me-2"></i><span>Usuários</span></a>
-    <?php endif; ?>
-    
-    <a href="logout.php" class="mt-auto text-danger border-top border-secondary" title="Sair"><i class="bi bi-box-arrow-right me-2"></i><span>Sair</span></a>
+    <?php endif; endforeach; ?>
+    <a href="logout.php" class="mt-auto text-danger border-top border-secondary" title="Sair">
+        <i class="bi bi-box-arrow-right me-2"></i><span>Sair</span>
+    </a>
 </div>
 
 <div class="content" id="content">
