@@ -326,6 +326,7 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
 
     try {
         $placa_clean = limpar_placa($placa);
+        $id_busca = $_GET['idLinha'] ?? null; // ID da Linha vindo da requisição (se houver)
 
         // 1. Posição Atual
         $veiculo = get_veiculo_posicao($placa_clean);
@@ -333,37 +334,102 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
         if (!$coords_atual) responder_json(["erro" => "Coordenadas inválidas."], 422);
         list($lat1, $lon1) = $coords_atual;
 
-        // 2. Busca Dados da Linha (Cache)
-        $data_dash = cache_get('main_dashboard_data');
-        if (!$data_dash && function_exists('simple_get')) {
-            list($resp, $c, $e) = simple_get($URL_DASHBOARD_MAIN, $HEADERS_DASHBOARD_MAIN, 10);
-            if (!$e) {
-                $data_dash = json_decode($resp, true);
-                if($data_dash) cache_set('main_dashboard_data', $data_dash, 60);
-            }
-        }
-        if (!$data_dash) responder_json(["erro" => "Dados indisponíveis."], 500);
-
-        $todas = array_merge($data_dash['linhasAndamento']??[], $data_dash['linhasCarroDesligado']??[], $data_dash['linhasComecaramSemPrimeiroPonto']??[]);
+        // ==============================================================================
+        // BUSCA ESTRITA COM REFRESH (PLACA + ID LINHA)
+        // ==============================================================================
+        
+        $encontrou_linha = false;
         $linha_alvo = null;
-        $id_busca = $_GET['idLinha'] ?? null;
+        $tentativa = 1;
+        $max_tentativas = 2; // Tenta 1x Cache, 1x Live
 
-        foreach ($todas as $l) {
-            if ($id_busca && ($l['idLinha'] ?? $l['id']) == $id_busca) { $linha_alvo = $l; break; }
-            if (!$id_busca && limpar_placa($l['veiculo']['veiculo']??'') == $placa_clean) { $linha_alvo = $l; break; }
+        // Função de busca estrita
+        $buscar_na_lista = function($dados_dash) use ($placa_clean, $id_busca) {
+            $todas = array_merge(
+                $dados_dash['linhasAndamento'] ?? [], 
+                $dados_dash['linhasCarroDesligado'] ?? [], 
+                $dados_dash['linhasComecaramSemPrimeiroPonto'] ?? []
+            );
+
+            foreach ($todas as $l) {
+                // Normaliza dados do item
+                $placa_item = limpar_placa($l['veiculo']['veiculo'] ?? $l['placa'] ?? '');
+                $id_linha_item = $l['idLinha'] ?? $l['id'] ?? null;
+
+                // 1. Verifica Placa
+                if ($placa_item !== $placa_clean) {
+                    continue; // Placa não bate, pula
+                }
+
+                // 2. Verifica ID da Linha (CRUCIAL: Se o usuario passou ID, TEM que bater)
+                if ($id_busca && $id_linha_item != $id_busca) {
+                    continue; // É o mesmo carro, mas está na linha errada (cache velho). Pula.
+                }
+
+                // Se chegou aqui, bateu Placa E (opcionalmente) ID da Linha
+                return $l;
+            }
+            return null;
+        };
+
+        while ($tentativa <= $max_tentativas) {
+            // 1ª Tentativa: Cache. 2ª Tentativa: Força Download.
+            if ($tentativa == 1) {
+                $data_dash = cache_get('main_dashboard_data');
+            } else {
+                $data_dash = null; 
+            }
+
+            // Se não tem dados, baixa
+            if (!$data_dash) {
+                $ch = curl_init($URL_DASHBOARD_MAIN);
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => 1,
+                    CURLOPT_TIMEOUT => 10,
+                    CURLOPT_HTTPHEADER => $HEADERS_DASHBOARD_MAIN ?? []
+                ]);
+                $resp = curl_exec($ch);
+                $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_close($ch);
+
+                if ($code == 200) {
+                    $data_dash = json_decode($resp, true);
+                    if ($data_dash) cache_set('main_dashboard_data', $data_dash, 60);
+                }
+            }
+
+            // Tenta buscar com a lógica estrita
+            if ($data_dash) {
+                $linha_alvo = $buscar_na_lista($data_dash);
+                if ($linha_alvo) {
+                    $encontrou_linha = true;
+                    break; 
+                }
+            }
+            
+            // Se o cache retornou o carro na linha errada, $linha_alvo será null.
+            // Isso força o loop a rodar a tentativa 2 (baixar dados novos).
+            $tentativa++;
         }
 
-        if (!$linha_alvo) responder_json(["erro" => "Linha não encontrada."], 404);
+        if (!$encontrou_linha || !$linha_alvo) {
+            responder_json(["erro" => "Linha/Veículo não encontrados nos dados atuais."], 404);
+        }
+
+        // ==============================================================================
+        // RESTANTE DO CÓDIGO (SEGUE NORMAL)
+        // ==============================================================================
 
         $id_linha_oficial = $linha_alvo['idLinha'] ?? $linha_alvo['id'] ?? null;
         $id_veiculo_mongo = $linha_alvo['veiculo']['id'] ?? null;
 
+        // ... (resto da lógica de busca paralela, waypoints e tomtom continua igual) ...
+        
         // 3. BUSCA PARALELA
         $rastros = buscar_dados_paralelos($id_linha_oficial, $id_veiculo_mongo);
         $rastro_programado = $rastros['programado'];
         $rastro_executado = $rastros['executado'];
 
-        // 4. Waypoints
         $pontos_mapa = [];
         foreach (($linha_alvo['pontoDeParadas'] ?? []) as $p) {
             if (empty($p['latitude'])) continue;
@@ -381,7 +447,6 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
             responder_json(["erro" => "Sem paradas."], 400);
         }
 
-        // 5. Filtragem Waypoints (Otimizada)
         $tomtom_string_coords = [sprintf("%.5f,%.5f", $lat1, $lon1)];
         $coords_visual = [[$lon1, $lat1]];
 
@@ -395,7 +460,6 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
 
             foreach ($pontos_mapa as $i => $p) {
                 if ($i === 0 || ($p['passou'] ?? false)) continue;
-                // Distância Rápida para filtro local
                 if (!$primeiro_valido) {
                     $d = calcular_distancia_rapida($lat1, $lon1, $p['lat'], $p['lng']);
                     $primeiro_valido = true;
@@ -417,7 +481,6 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
             }
         }
 
-        // 6. TomTom
         $tomtom_data = calcular_rota_tomtom(implode(':', $tomtom_string_coords));
         $summary = $tomtom_data["routes"][0]["summary"] ?? ["travelTimeInSeconds" => 0, "lengthInMeters" => 0];
         
@@ -427,7 +490,6 @@ function handle_calcular_rota($placa, $tipo_destino = "Final") {
         $minutos = floor(($segundos % 3600) / 60);
         $tempo_txt = $horas > 0 ? "{$horas}h {$minutos}min" : "{$minutos} min";
 
-        // 7. Simplificação Final
         $rastro_programado = arredondar_coords(simplificar_rota($rastro_programado, 0.0001));
         $rastro_executado = arredondar_coords(simplificar_rota($rastro_executado, 0.0001));
         $coords_visual = arredondar_coords($coords_visual);
