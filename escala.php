@@ -1,17 +1,27 @@
 <?php
-// --- CONFIGURAÇÃO E SESSÃO ---
+// 1. INÍCIO E CONFIGURAÇÕES (Sem HTML)
+ob_start(); 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
-require_once 'config.php'; 
-require_once 'menus.php'; 
-require_once 'includes/page_logic.php';
 
+require_once 'config.php'; 
+// Se page_logic.php tiver HTML ou espaços em branco, pode causar erro. 
+// O ideal é que ele só tenha código PHP.
+require_once 'includes/page_logic.php'; 
+
+// 2. VERIFICAÇÃO DE SEGURANÇA
 if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true) {
+    // Se for AJAX e não estiver logado, retorna erro JSON
+    if (isset($_GET['ajax'])) {
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'auth_required']);
+        exit;
+    }
     header("Location: login.php"); exit;
 }
 session_write_close();
 verificarPermissaoPagina('escala');
 
-// --- CONSTANTES ---
+// 3. DEFINIÇÃO DE CONSTANTES
 define('GOOGLE_SCRIPT_URL', 'https://script.google.com/macros/s/AKfycbxpJjRQ0KhIQtHA36CD_cugZyQD1GrftfIahwqxV9Nqxx1jnF5T2bt0tQgNM0kWfRArrQ/exec'); 
 define('CACHE_TIME', 60); 
 date_default_timezone_set('America/Sao_Paulo');
@@ -19,63 +29,72 @@ date_default_timezone_set('America/Sao_Paulo');
 $data_filtro = $_GET['data'] ?? date('d/m/Y'); 
 $nome_arquivo_cache = 'cache_frota_' . str_replace('/', '-', $data_filtro) . '.json';
 
-// --- GARBAGE COLLECTOR ---
-if (rand(1, 100) === 1) {
-    $files = glob('cache_frota_*.json');
-    if ($files) {
-        $now = time();
-        foreach ($files as $file) { if ($now - filemtime($file) > 172800) @unlink($file); }
-    }
-}
-
-if (isset($_GET['force_refresh']) && $_GET['force_refresh'] == '1') {
-    if (file_exists($nome_arquivo_cache)) @unlink($nome_arquivo_cache); 
-}
-
 // --- HELPERS ---
 function h($str) { return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8'); }
 
 function getDadosJsonCurl($scriptUrl, $data, $cacheFile, $cacheTime) {
+    // Tenta ler do cache primeiro
     if (file_exists($cacheFile) && (time() - filemtime($cacheFile) < $cacheTime)) {
         $conteudo = @file_get_contents($cacheFile);
         if ($conteudo) return json_decode($conteudo, true);
     }
+    
     $ch = curl_init();
+    // Importante: Passamos a action=read e a data
     curl_setopt($ch, CURLOPT_URL, $scriptUrl . "?action=read&data=" . urlencode($data));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15); // Aumentei timeout para garantir
+    
+    // Se seu servidor tiver problemas com SSL antigo, descomente as linhas abaixo:
+    // curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    // curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     if ($httpCode == 200 && $response) {
         $json = json_decode($response, true);
+        // Só salva em cache se for um array válido e NÃO tiver erro
         if (is_array($json) && !isset($json['error'])) {
             file_put_contents($cacheFile, $response);
             return $json;
         }
     }
+    
+    // Fallback: tenta cache antigo se a conexão falhar
     if (file_exists($cacheFile)) return json_decode(file_get_contents($cacheFile), true);
     return [];
 }
 
 function processarDados($rows) {
     if (!is_array($rows) || isset($rows['error']) || empty($rows)) return [];
+    
+    // Normaliza cabeçalho para minúsculo
     $header = array_map('mb_strtolower', array_map('trim', $rows[0]));
+    
+    // Função auxiliar para achar índice da coluna
     $findCol = function($keywords) use ($header) {
         foreach ($header as $idx => $colName) {
             foreach ($keywords as $key) { if (strpos($colName, $key) !== false) return $idx; }
         } return -1;
     };
 
+    // Mapeamento das colunas (Adicione variações de nomes aqui se precisar)
     $map = [
-        'empresa' => $findCol(['clientes']), 'rota' => $findCol(['rota', 'linha']),
-        'motorista' => $findCol(['motorista', 'condutor']), 'reserva' => $findCol(['reserva']),
-        'escala' => $findCol(['escala']), 'enviada' => $findCol(['enviada']),
-        'prog' => $findCol(['ini']), 'real' => $findCol(['real', 'realizado']),
-        'obs' => $findCol(['observação', 'obs']), 'manut' => $findCol(['manutenção', 'manut']),
-        'carro' => $findCol(['aguardando', 'carro']), 'ra' => $findCol(['ra', 'r.a', 'registro'])
+        'empresa' => $findCol(['clientes', 'cliente', 'empresa']), 
+        'rota' => $findCol(['rota', 'linha', 'itinerario']),
+        'motorista' => $findCol(['motorista', 'condutor', 'mot']), 
+        'reserva' => $findCol(['reserva']),
+        'escala' => $findCol(['escala', 'veiculo escala']), 
+        'enviada' => $findCol(['enviada', 'veiculo enviado']),
+        'prog' => $findCol(['ini', 'inicio', 'prog']), 
+        'real' => $findCol(['real', 'realizado', 'chegada']),
+        'obs' => $findCol(['observação', 'obs', 'ocorrencia']), 
+        'manut' => $findCol(['manutenção', 'manut']),
+        'carro' => $findCol(['aguardando', 'carro']), 
+        'ra' => $findCol(['ra', 'r.a', 'registro'])
     ];
 
     $dados = [];
@@ -83,11 +102,13 @@ function processarDados($rows) {
 
     for ($i = 1; $i < count($rows); $i++) {
         $r = $rows[$i];
+        
+        // Pula linhas vazias onde não tem empresa nem rota
         if (empty($r[$map['empresa']] ?? '') && empty($r[$map['rota']] ?? '')) continue;
         
         $empresa = isset($r[$map['empresa']]) ? trim($r[$map['empresa']]) : '---';
         
-        // Bloqueio de Empresas
+        // Bloqueio de Empresas Específicas
         $empresaCheck = mb_strtoupper($empresa, 'UTF-8');
         $empresasIgnoradas = ['VIACAO MIMO VARZEA', 'VIAÇÃO MIMO VARZEA', 'VIACAO MIMO', 'VIAÇÃO MIMO'];
         if (in_array($empresaCheck, $empresasIgnoradas)) continue;
@@ -113,23 +134,35 @@ function processarDados($rows) {
     return $dados;
 }
 
-// --- CARGA DE DADOS ---
-$raw_data = getDadosJsonCurl(GOOGLE_SCRIPT_URL, $data_filtro, $nome_arquivo_cache, CACHE_TIME);
-$lista_dados = processarDados($raw_data);
-
-// Ordenação Padrão (PHP)
-usort($lista_dados, function($a, $b) {
-    if ($a['h_prog'] == $b['h_prog']) return 0;
-    return ($a['h_prog'] < $b['h_prog']) ? -1 : 1;
-});
-
-$empresas_unicas = [];
-foreach ($lista_dados as $l) { if($l['empresa']!=='---') $empresas_unicas[$l['empresa']] = $l['empresa']; }
-asort($empresas_unicas);
-
-// --- AJAX HANDLER ---
+// 4. BLOCO AJAX (EXECUTADO ANTES DE QUALQUER HTML)
 if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
-    ob_clean(); header('Content-Type: application/json');
+    // Garbage Collector de Cache
+    if (rand(1, 100) === 1) {
+        $files = glob('cache_frota_*.json');
+        if ($files) {
+            $now = time();
+            foreach ($files as $file) { if ($now - filemtime($file) > 172800) @unlink($file); }
+        }
+    }
+    // Force Refresh
+    if (isset($_GET['force_refresh']) && $_GET['force_refresh'] == '1') {
+        if (file_exists($nome_arquivo_cache)) @unlink($nome_arquivo_cache); 
+    }
+
+    // Busca dados
+    $raw_data = getDadosJsonCurl(GOOGLE_SCRIPT_URL, $data_filtro, $nome_arquivo_cache, CACHE_TIME);
+    $lista_dados = processarDados($raw_data);
+
+    // Ordenação Padrão
+    usort($lista_dados, function($a, $b) {
+        if ($a['h_prog'] == $b['h_prog']) return 0;
+        return ($a['h_prog'] < $b['h_prog']) ? -1 : 1;
+    });
+
+    // Limpeza de buffer segura
+    while (ob_get_level()) { @ob_end_clean(); }
+
+    header('Content-Type: application/json');
     $currentHash = md5(json_encode($lista_dados));
     $clientHash = $_GET['last_hash'] ?? '';
 
@@ -138,8 +171,16 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     } else {
         echo json_encode(['status' => 'updated', 'hash' => $currentHash, 'dados' => $lista_dados]);
     }
-    exit;
+    exit; // ENCERRA O SCRIPT AQUI. Não carrega o HTML abaixo.
 }
+
+// 5. CARGA INICIAL (SOMENTE HTML)
+require_once 'menus.php'; 
+
+// Envia qualquer buffer pendente
+if(ob_get_level()) ob_end_flush();
+
+$lista_dados = []; // Inicia vazio para o JS preencher via AJAX
 ?>
 <!DOCTYPE html>
 <html lang="pt-br">
@@ -259,9 +300,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
                     <label class="form-label small fw-bold text-secondary mb-1">Empresa</label>
                     <select id="filtroEmpresa" class="form-select form-select-sm">
                         <option value="">Todas</option>
-                        <?php foreach ($empresas_unicas as $emp): ?>
-                            <option value="<?php echo h($emp); ?>"><?php echo h($emp); ?></option>
-                        <?php endforeach; ?>
+                        <!-- Options serão populadas via JS -->
                     </select>
                 </div>
                 <div class="col-md-3">
@@ -307,8 +346,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
     // --- ESTADO GLOBAL ---
-    let DADOS_GLOBAIS = <?php echo json_encode($lista_dados); ?>; 
-    let currentHash = '<?php echo md5(json_encode($lista_dados)); ?>';
+    // Inicializa vazio, será populado via AJAX
+    let DADOS_GLOBAIS = []; 
+    let currentHash = '';
     let timeLeft = 60;
     let filterTimeout;
     let sortConfig = { key: 'h_prog', order: 'asc' }; 
@@ -332,6 +372,32 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         connDot: document.getElementById('connStatus'),
         connText: document.getElementById('connText')
     };
+
+    // --- FUNÇÃO PARA POPULAR FILTRO DE EMPRESAS ---
+    function atualizarFiltroEmpresas() {
+        const select = els.empresa;
+        const valorAtual = select.value;
+        const empresas = new Set();
+        
+        // Coleta empresas únicas dos dados carregados
+        DADOS_GLOBAIS.forEach(row => {
+            if(row.empresa !== '---') empresas.add(row.empresa);
+        });
+        
+        // Converte para array e ordena
+        const empresasArray = Array.from(empresas).sort();
+
+        // Mantém a opção "Todas" e reconstrói as outras
+        select.innerHTML = '<option value="">Todas</option>';
+        
+        empresasArray.forEach(emp => {
+            const option = document.createElement('option');
+            option.value = emp;
+            option.text = emp;
+            if(emp === valorAtual) option.selected = true; // Mantém seleção
+            select.appendChild(option);
+        });
+    }
 
     // --- ORDENAÇÃO ---
     function sortTable(key) {
@@ -408,6 +474,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
 
     // --- RENDERIZAÇÃO ---
     function renderizarApp() {
+        // Se ainda não tem dados, não faz nada (mantém spinner)
+        if (DADOS_GLOBAIS.length === 0) return;
+
         const empresaSel = els.empresa.value;
         const statusSel = els.status.value;
         const termo = els.search.value.toLowerCase();
@@ -453,7 +522,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             if (statusKey === 'manutencao') badgeHtml = '<span class="badge rounded-pill badge-status-erro px-3">Manutenção</span>';
             else if (statusKey === 'confirmado') badgeHtml = '<span class="badge rounded-pill badge-status-ok px-3">Confirmado</span>';
 
-            // Check Atraso (Simples String Compare funciona para HH:mm formato ISO)
+            // Check Atraso
             const isAtrasado = (row.h_real && row.h_prog && row.h_real > row.h_prog && row.h_real !== 'N/D');
             const classReal = isAtrasado ? 'text-atraso' : 'text-muted';
 
@@ -519,6 +588,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         const urlParams = new URLSearchParams(window.location.search);
         const dataAtual = urlParams.get('data') || '<?php echo h($data_filtro); ?>';
         
+        // Chama a URL atual com ?ajax=1 para pegar os dados
         fetch(window.location.pathname + `?ajax=1&data=${encodeURIComponent(dataAtual)}&last_hash=${currentHash}`)
             .then(r => {
                 if(!r.ok) throw new Error("Erro");
@@ -529,7 +599,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
                 if (data.status === 'updated') {
                     DADOS_GLOBAIS = data.dados;
                     currentHash = data.hash;
-                    renderizarApp();
+                    
+                    atualizarFiltroEmpresas(); // Atualiza o select de empresas
+                    renderizarApp(); // Renderiza a tabela
+                    
                     els.card.classList.add('table-updated');
                     setTimeout(()=>els.card.classList.remove('table-updated'), 500);
                 }
@@ -566,7 +639,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     if(localStorage.getItem('mimo_status')) els.status.value = localStorage.getItem('mimo_status');
     if(localStorage.getItem('mimo_search')) els.search.value = localStorage.getItem('mimo_search');
 
-    renderizarApp();
+    // Inicialização
+    renderizarApp(); 
+    atualizarDados(); 
+    
     window.addEventListener('online', () => updateStatus(true));
     window.addEventListener('offline', () => updateStatus(false));
 </script>
