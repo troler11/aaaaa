@@ -87,22 +87,10 @@ function processarDados($rows) {
         
         $empresa = isset($r[$map['empresa']]) ? trim($r[$map['empresa']]) : '---';
         
-        // --- FILTRO DE BLOQUEIO (Aqui acontece a mágica) ---
-        // Converte para maiúsculo para garantir que pegue mesmo se escrever 'Viacao' ou 'VIACAO'
+        // Bloqueio de Empresas
         $empresaCheck = mb_strtoupper($empresa, 'UTF-8');
-        
-        // Lista de empresas ignoradas (Adicionei com e sem acento para garantir)
-        $empresasIgnoradas = [
-            'VIACAO MIMO VARZEA',
-            'VIAÇÃO MIMO VARZEA',
-            'VIACAO MIMO', // Caso queira bloquear a principal também
-            'VIAÇÃO MIMO'
-        ];
-
-        if (in_array($empresaCheck, $empresasIgnoradas)) {
-            continue; // PULA essa linha. Não conta no KPI, não aparece na tabela.
-        }
-        // ---------------------------------------------------
+        $empresasIgnoradas = ['VIACAO MIMO VARZEA', 'VIAÇÃO MIMO VARZEA', 'VIACAO MIMO', 'VIAÇÃO MIMO'];
+        if (in_array($empresaCheck, $empresasIgnoradas)) continue;
 
         $valManut = $r[$map['manut']] ?? '';
         $valCarro = $r[$map['carro']] ?? '';
@@ -129,13 +117,12 @@ function processarDados($rows) {
 $raw_data = getDadosJsonCurl(GOOGLE_SCRIPT_URL, $data_filtro, $nome_arquivo_cache, CACHE_TIME);
 $lista_dados = processarDados($raw_data);
 
-// Ordenação
+// Ordenação Padrão (PHP)
 usort($lista_dados, function($a, $b) {
     if ($a['h_prog'] == $b['h_prog']) return 0;
     return ($a['h_prog'] < $b['h_prog']) ? -1 : 1;
 });
 
-// Lista de Empresas para o Select
 $empresas_unicas = [];
 foreach ($lista_dados as $l) { if($l['empresa']!=='---') $empresas_unicas[$l['empresa']] = $l['empresa']; }
 asort($empresas_unicas);
@@ -163,6 +150,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
+        .sidebar .logo-container img{transition:all .3s;max-width:160px}
+        .sidebar.toggled .logo-container img{max-width:50px}
         :root { --sidebar-bg: #0f172a; --sidebar-width: 260px; --card-blue: #1e3a8a; --card-green: #10b981; --card-amber: #f59e0b; --alert-red: #dc2626; --alert-orange: #f97316; --alert-purple: #7e22ce; }
         body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; overflow-x: hidden; }
         .sidebar { background-color: #0b1f3a; color: white; min-height: 100vh; width: 250px; position: fixed; z-index: 1000; transition: width 0.3s ease; overflow-y: auto; }
@@ -189,7 +178,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         .border-purple { border-left-color: var(--alert-purple); } .text-purple { color: var(--alert-purple); }
         
         .card-table { background: white; border-radius: 12px; border: 1px solid #e5e7eb; overflow: hidden; }
-        .table-custom thead th { background-color: #f8fafc; color: #64748b; font-size: 0.75rem; text-transform: uppercase; font-weight: 700; padding: 1rem; border-bottom: 1px solid #e2e8f0; }
+        .table-custom thead th { background-color: #f8fafc; color: #64748b; font-size: 0.75rem; text-transform: uppercase; font-weight: 700; padding: 1rem; border-bottom: 1px solid #e2e8f0; cursor: pointer; user-select: none; }
+        .table-custom thead th:hover { background-color: #e2e8f0; color: #334155; }
         .table-custom tbody td { padding: 1rem; vertical-align: middle; color: #334155; font-size: 0.875rem; border-bottom: 1px solid #f1f5f9; }
         
         .badge-status-pendente { background-color: #fef3c7; color: #b45309; border: 1px solid #fcd34d; }
@@ -203,14 +193,18 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         
         .progress-container { height: 4px; width: 100%; background-color: #f1f5f9; position: relative; }
         .progress-bar-custom { height: 100%; background-color: #10b981; width: 100%; transition: width 1s linear; }
-        .d-none-filter { display: none !important; }
+        
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .status-online { background-color: #10b981; box-shadow: 0 0 5px #10b981; }
+        .status-offline { background-color: #ef4444; box-shadow: 0 0 5px #ef4444; }
+        .text-atraso { color: #dc2626; font-weight: 700; }
     </style>
 </head>
 <body>
 
 <div class="sidebar d-flex flex-column" id="sidebar">
     <div class="text-center py-4 bg-dark bg-opacity-25 logo-container">
-        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo" style="max-width: 160px; transition: all 0.3s;">
+        <img src="https://viacaomimo.com.br/wp-content/uploads/2023/07/Background-12-1.png" alt="Logo">
     </div>
     <?php foreach ($menu_itens as $chave => $item): 
         if ((($_SESSION['user_role'] ?? '') === 'admin') || in_array($chave, $permissoes_usuario)): ?>
@@ -225,9 +219,20 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     <header class="top-header">
         <div class="d-flex align-items-center gap-3">
             <button class="btn btn-light btn-sm shadow-sm" id="btnToggle"><i class="bi bi-list fs-5"></i></button>
-            <div><h5 class="mb-0 fw-bold text-dark">Visão Geral das Linhas</h5><small class="text-muted">Data: <strong><?php echo h($data_filtro); ?></strong></small></div>
+            <div>
+                <h5 class="mb-0 fw-bold text-dark">Visão Geral das Linhas</h5>
+                <div class="d-flex align-items-center small text-muted">
+                    <span id="connStatus" class="status-dot status-online"></span>
+                    <span id="connText">Online</span>
+                    <span class="mx-2">•</span>
+                    Data: <strong><?php echo h($data_filtro); ?></strong>
+                </div>
+            </div>
         </div>
         <div class="d-flex align-items-center gap-3">
+            <button class="btn btn-outline-success btn-sm" onclick="exportToCSV()" title="Baixar Excel"><i class="bi bi-file-earmark-spreadsheet"></i> Exportar</button>
+            <button class="btn btn-outline-secondary btn-sm" onclick="toggleFullScreen()" title="Modo TV"><i class="bi bi-arrows-fullscreen"></i></button>
+            
             <form method="GET" class="d-flex gap-2">
                 <input type="text" name="data" class="form-control form-control-sm" value="<?php echo h($data_filtro); ?>" style="width: 120px;" placeholder="dd/mm/aaaa">
                 <button class="btn btn-dark btn-sm">Ir</button>
@@ -275,19 +280,19 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         <div class="card-table" id="cardTable">
             <div class="p-3 border-bottom bg-white d-flex justify-content-between align-items-center">
                 <h6 class="mb-0 fw-bold text-dark">Operação</h6>
-                <small class="text-muted"><i class="bi bi-clock-history"></i> Auto-update</small>
+                <small class="text-muted"><i class="bi bi-arrow-down-up"></i> Clique nos títulos para ordenar</small>
             </div>
             <div class="progress-container"><div class="progress-bar-custom" id="progressBar"></div></div>
             <div class="table-responsive">
                 <table class="table table-custom mb-0 w-100">
                     <thead>
                         <tr>
-                            <th>Empresa / Rota</th>
-                            <th class="text-center">Frotas</th>
-                            <th>Motorista</th>
+                            <th onclick="sortTable('empresa')">Empresa / Rota <i class="bi bi-sort-alpha-down small ms-1"></i></th>
+                            <th class="text-center" onclick="sortTable('frota_escala')">Frotas <i class="bi bi-sort-numeric-down small ms-1"></i></th>
+                            <th onclick="sortTable('motorista')">Motorista <i class="bi bi-sort-alpha-down small ms-1"></i></th>
                             <th>Detalhes & Obs</th>
-                            <th class="text-center">Status</th>
-                            <th class="text-end">Horário</th>
+                            <th class="text-center" onclick="sortTable('status')">Status <i class="bi bi-sort-down small ms-1"></i></th>
+                            <th class="text-end" onclick="sortTable('h_prog')">Horário <i class="bi bi-clock small ms-1"></i></th>
                         </tr>
                     </thead>
                     <tbody id="tabela-veiculos">
@@ -306,6 +311,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     let currentHash = '<?php echo md5(json_encode($lista_dados)); ?>';
     let timeLeft = 60;
     let filterTimeout;
+    let sortConfig = { key: 'h_prog', order: 'asc' }; 
 
     // Elementos
     const els = {
@@ -322,21 +328,97 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             manutencao: document.getElementById('kpi-manutencao'),
             aguardando: document.getElementById('kpi-aguardando'),
             cobrir: document.getElementById('kpi-cobrir')
-        }
+        },
+        connDot: document.getElementById('connStatus'),
+        connText: document.getElementById('connText')
     };
 
-    // --- FUNÇÃO DE RENDERIZAÇÃO (Filtros no JS) ---
+    // --- ORDENAÇÃO ---
+    function sortTable(key) {
+        if (sortConfig.key === key) {
+            sortConfig.order = sortConfig.order === 'asc' ? 'desc' : 'asc';
+        } else {
+            sortConfig.key = key;
+            sortConfig.order = 'asc';
+        }
+        renderizarApp();
+    }
+
+    function applySort(data) {
+        return data.sort((a, b) => {
+            let valA = a[sortConfig.key] || '';
+            let valB = b[sortConfig.key] || '';
+
+            if (sortConfig.key === 'status') {
+                valA = a.manutencao ? '3' : (a.ra_val ? '2' : '1');
+                valB = b.manutencao ? '3' : (b.ra_val ? '2' : '1');
+            }
+
+            if (valA < valB) return sortConfig.order === 'asc' ? -1 : 1;
+            if (valA > valB) return sortConfig.order === 'asc' ? 1 : -1;
+            return 0;
+        });
+    }
+
+    // --- UTILS ---
+    function toggleFullScreen() {
+        if (!document.fullscreenElement) { document.documentElement.requestFullscreen(); } 
+        else { if (document.exitFullscreen) document.exitFullscreen(); }
+    }
+
+    function exportToCSV() {
+        const empresaSel = els.empresa.value;
+        const statusSel = els.status.value;
+        const termo = els.search.value.toLowerCase();
+        
+        let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; // BOM para Excel
+        csvContent += "Empresa;Rota;Motorista;Reserva;Frota Escala;Frota Enviada;Status;H. Prog;H. Real;Obs;RA\n";
+
+        DADOS_GLOBAIS.forEach(row => {
+            if (empresaSel && row.empresa !== empresaSel) return;
+            const obsTexto = (row.obs || '').toString();
+            const realizou = (row.ra_val && String(row.ra_val).trim() !== '');
+            const isCobrir = obsTexto.toLowerCase().includes('cobrir');
+            let statusKey = 'pendente';
+            if (row.manutencao) statusKey = 'manutencao';
+            else if (realizou) statusKey = 'confirmado';
+            
+            if (statusSel) {
+                if (statusSel === 'cobrir') { if (!isCobrir) return; }
+                else if (statusSel !== statusKey) return;
+            }
+            const searchText = `${row.empresa} ${row.rota} ${row.motorista} ${row.frota_escala} ${row.frota_enviada} ${obsTexto}`.toLowerCase();
+            if (termo && !searchText.includes(termo)) return;
+
+            let statusLabel = row.manutencao ? 'Manutencao' : (realizou ? 'Confirmado' : 'Aguardando');
+            // CSV Escape
+            const escape = (t) => `"${String(t).replace(/"/g, '""')}"`;
+            
+            csvContent += `${escape(row.empresa)};${escape(row.rota)};${escape(row.motorista)};${escape(row.reserva)};${escape(row.frota_escala)};${escape(row.frota_enviada)};${statusLabel};${row.h_prog};${row.h_real};${escape(row.obs)};${row.ra_val}\n`;
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", "frota_export.csv");
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+
+    // --- RENDERIZAÇÃO ---
     function renderizarApp() {
         const empresaSel = els.empresa.value;
         const statusSel = els.status.value;
         const termo = els.search.value.toLowerCase();
         
+        const dadosOrdenados = applySort([...DADOS_GLOBAIS]);
+
         let html = '';
         let kpi = { total:0, confirmados:0, pendentes:0, manutencao:0, aguardando:0, cobrir:0 };
         const safe = (s) => s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
 
-        DADOS_GLOBAIS.forEach(row => {
-            // Filtros
+        dadosOrdenados.forEach(row => {
             if (empresaSel && row.empresa !== empresaSel) return;
             
             const obsTexto = (row.obs || '').toString();
@@ -359,18 +441,21 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             kpi.total++;
             if (statusKey === 'confirmado') kpi.confirmados++;
             else if (statusKey === 'pendente' && !row.manutencao) kpi.pendentes++;
-            
             if (row.manutencao) kpi.manutencao++;
             if (row.aguardando) kpi.aguardando++;
             if (isCobrir) kpi.cobrir++;
 
-            // HTML
+            // HTML Construction
             const divergencia = (row.frota_escala != row.frota_enviada);
             const obsDisplay = safe(obsTexto.length > 30 ? obsTexto.substring(0, 30) + '...' : obsTexto);
             
             let badgeHtml = '<span class="badge rounded-pill badge-status-pendente px-3">Aguardando</span>';
             if (statusKey === 'manutencao') badgeHtml = '<span class="badge rounded-pill badge-status-erro px-3">Manutenção</span>';
             else if (statusKey === 'confirmado') badgeHtml = '<span class="badge rounded-pill badge-status-ok px-3">Confirmado</span>';
+
+            // Check Atraso (Simples String Compare funciona para HH:mm formato ISO)
+            const isAtrasado = (row.h_real && row.h_prog && row.h_real > row.h_prog && row.h_real !== 'N/D');
+            const classReal = isAtrasado ? 'text-atraso' : 'text-muted';
 
             html += `
             <tr>
@@ -391,16 +476,16 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
                     </div>
                 </td>
                 <td class="text-center">${badgeHtml}</td>
-                <td class="text-end"><div><small class="text-muted">Prog:</small> <strong>${safe(row.h_prog)}</strong></div>${(row.h_real && row.h_real!=='N/D') ? `<div><small class="text-muted">Real:</small> ${safe(row.h_real)}</div>` : ''}</td>
+                <td class="text-end">
+                    <div><small class="text-muted">Prog:</small> <strong>${safe(row.h_prog)}</strong></div>
+                    ${(row.h_real && row.h_real!=='N/D') ? `<div><small class="text-muted">Real:</small> <span class="${classReal}">${safe(row.h_real)}</span></div>` : ''}
+                </td>
             </tr>`;
         });
 
-        if (html === '') html = '<tr><td colspan="6" class="text-center py-5 text-muted">Nenhum registro encontrado com esses filtros.</td></tr>';
+        if (html === '') html = '<tr><td colspan="6" class="text-center py-5 text-muted">Nenhum registro encontrado.</td></tr>';
         
-        const scrollPos = window.scrollY;
         els.tbody.innerHTML = html;
-        window.scrollTo(0, scrollPos);
-
         els.kpis.total.innerText = kpi.total;
         els.kpis.confirmados.innerText = kpi.confirmados;
         els.kpis.pendentes.innerText = kpi.pendentes;
@@ -420,12 +505,26 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     els.status.addEventListener('change', aplicarFiltros);
     els.search.addEventListener('keyup', () => { clearTimeout(filterTimeout); filterTimeout = setTimeout(aplicarFiltros, 300); });
 
+    function updateStatus(isOnline) {
+        if(isOnline) {
+            els.connDot.classList.remove('status-offline'); els.connDot.classList.add('status-online');
+            els.connText.innerText = "Online"; els.connText.classList.remove('text-danger');
+        } else {
+            els.connDot.classList.remove('status-online'); els.connDot.classList.add('status-offline');
+            els.connText.innerText = "Offline"; els.connText.classList.add('text-danger');
+        }
+    }
+
     function atualizarDados() {
         const urlParams = new URLSearchParams(window.location.search);
         const dataAtual = urlParams.get('data') || '<?php echo h($data_filtro); ?>';
         
         fetch(window.location.pathname + `?ajax=1&data=${encodeURIComponent(dataAtual)}&last_hash=${currentHash}`)
-            .then(r => r.json())
+            .then(r => {
+                if(!r.ok) throw new Error("Erro");
+                updateStatus(true);
+                return r.json();
+            })
             .then(data => {
                 if (data.status === 'updated') {
                     DADOS_GLOBAIS = data.dados;
@@ -437,7 +536,11 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
                 timeLeft = 60;
                 els.progress.style.width = "100%";
             })
-            .catch(e => { timeLeft = 60; console.error(e); });
+            .catch(e => { 
+                timeLeft = 60; 
+                updateStatus(false);
+                console.error(e); 
+            });
     }
 
     setInterval(() => {
@@ -464,6 +567,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     if(localStorage.getItem('mimo_search')) els.search.value = localStorage.getItem('mimo_search');
 
     renderizarApp();
+    window.addEventListener('online', () => updateStatus(true));
+    window.addEventListener('offline', () => updateStatus(false));
 </script>
 </body>
 </html>
