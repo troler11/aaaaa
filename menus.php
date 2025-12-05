@@ -9,6 +9,7 @@ $menu_itens = [
     'motoristas' => ['label' => 'Motoristas', 'icon' => 'bi-person-vcard',      'link' => '#'],
     'escala'     => ['label' => 'Escala',     'icon' => 'bi-calendar-week',      'link' => 'escala.php'], // Ícone repetido conforme seu código
     'relatorios' => ['label' => 'Power BI', 'icon' => 'bi-calendar-week', 'link' => 'relatorio.php'],
+    'usuarios' => ['label' => 'Usuários', 'icon' => 'bi-people-fill me-2', 'link' => 'admin.php'],
 ];
 
 // Pega as permissões da sessão (Array de strings, ex: ['rotas', 'veiculos'])
