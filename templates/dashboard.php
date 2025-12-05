@@ -1,163 +1,89 @@
 <?php
-// --- CONFIGURAÇÃO E SESSÃO ---
-if (session_status() === PHP_SESSION_NONE) { session_start(); }
+// --- OTIMIZAÇÃO 1: GZIP SEGURO ---
+if (extension_loaded('zlib') && !ini_get('zlib.output_compression')) {
+    if (!@ob_start("ob_gzhandler")) ob_start();
+} else {
+    ob_start();
+}
 
+// --- CONFIGURAÇÃO ---
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'config.php'; 
 require_once 'menus.php'; 
 require_once 'includes/page_logic.php';
 
-// Segurança
-if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true) {
-    header("Location: login.php"); exit;
-}
+if (!isset($_SESSION['user_logged_in']) || $_SESSION['user_logged_in'] !== true) { header("Location: login.php"); exit; }
 verificarPermissaoPagina('dashboard');
 
-// Configurações Iniciais
 $empresas_permitidas = $_SESSION['allowed_companies'] ?? [];
 date_default_timezone_set('America/Sao_Paulo'); 
 $hora_atual = date('H:i');
 
-// Carga de dados (Server Side)
-$dados_dashboard = handle_index_data($empresas_permitidas);
-extract($dados_dashboard); // Disponibiliza $todas_linhas, $qtd_total, etc.
+// --- CACHE BACKEND (Arquivo) ---
+$cacheKey = md5(json_encode($empresas_permitidas));
+$cacheFile = sys_get_temp_dir() . "/dashboard_frota_$cacheKey.json";
+$cacheTime = 15; 
 
-// Filtros PHP
-$filtro_empresa = $_GET['empresa'] ?? '';
-$filtro_sentido = $_GET['sentido'] ?? '';
-$primeiro_veiculo_json = json_encode($todas_linhas[0] ?? null, JSON_UNESCAPED_UNICODE);
+$dados_dashboard = null;
+$usando_cache = false; 
 
-// Lista única de empresas
-$lista_empresas_unicas = [];
-if (!empty($todas_linhas)) {
-    foreach ($todas_linhas as $l) {
-        if (!empty($l['empresa']['nome'])) $lista_empresas_unicas[$l['empresa']['nome']] = $l['empresa']['nome'];
+if (file_exists($cacheFile) && (time() - filemtime($cacheFile) < $cacheTime)) {
+    $conteudo_cache = file_get_contents($cacheFile);
+    if ($conteudo_cache) {
+        $dados_dashboard = json_decode($conteudo_cache, true);
+        $usando_cache = true;
     }
-    asort($lista_empresas_unicas);
 }
 
-// --- FUNÇÃO DE RENDERIZAÇÃO (REUTILIZÁVEL) ---
-// Usada tanto no carregamento inicial quanto no AJAX para economizar processamento
-function renderizar_linhas_tabela($linhas, $filtro_empresa, $filtro_sentido, $hora_atual) {
-    if (empty($linhas)) {
-        echo '<tr><td colspan="12" class="text-center py-4 text-muted">Nenhum veículo encontrado com os filtros selecionados.</td></tr>';
-        return;
-    }
-
-    $contador = 0;
-    foreach ($linhas as $linha) {
-        // Filtros PHP
-        if (!empty($filtro_empresa) && ($linha['empresa']['nome'] ?? '') !== $filtro_empresa) continue;
-        
-        $sIdaRaw = $linha['sentidoIDA'] ?? $linha['sentidoIda'] ?? true;
-        $sentido_ida_bool = filter_var($sIdaRaw, FILTER_VALIDATE_BOOLEAN);
-        $sentido_string = $sentido_ida_bool ? 'ida' : 'volta';
-
-        if (!empty($filtro_sentido) && $sentido_string !== $filtro_sentido) continue;
-        
-        $contador++;
-        $id_linha = $linha['idLinha'] ?? '';
-        $prog = $linha['horarioProgramado'] ?? '23:59';
-        $real = $linha['horarioReal'] ?? 'N/D';
-        $data_prog_fim = htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES);
-        
-        // Cache
-        $timestamp_cache = $linha['previsao_fim_ts'] ?? ''; 
-        $tem_cache = !empty($timestamp_cache);
-        $valor_cache = $tem_cache ? date('H:i', $timestamp_cache) : '--:--';
-
-        // Ícones e Atributos
-        $sentido_ida_attr = $sentido_ida_bool ? 'true' : 'false';
-        $icon_sentido = $sentido_ida_bool 
-            ? '<i class="bi bi-arrow-right-circle-fill text-primary ms-1" title="IDA"></i>' 
-            : '<i class="bi bi-arrow-left-circle-fill text-warning ms-1" title="VOLTA"></i>';
-
-        // Lógica de Status (Otimizada)
-        $status_html = '';
-        $atraso_saida = false;
-        $atraso_percurso = false;
-        $tolerancia = 10;
-        
-        // Helper para diff
-        $diffMinutos = function($h1, $h2) {
-            if ($h1 == 'N/D' || $h2 == 'N/D' || empty($h1) || empty($h2)) return 0;
-            $t1 = DateTime::createFromFormat('H:i', $h1); $t2 = DateTime::createFromFormat('H:i', $h2);
-            return ($t1 && $t2) ? ($t2->getTimestamp() - $t1->getTimestamp()) / 60 : 0;
-        };
-
-        if (($linha['categoria'] ?? '') == 'Carro desligado') {
-             $status_html = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
-        } elseif ($real == 'N/D' || empty($real)) {
-             $diff = $diffMinutos($prog, $hora_atual);
-             if ($diff > $tolerancia) {
-                 $atraso_saida = true;
-                 $status_html = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
-             } else {
-                 $status_html = '<span class="badge bg-light text-dark border">Aguardando</span>';
-             }
-        } else {
-             $diff_saida = $diffMinutos($prog, $real);
-             
-             if ($sentido_ida_bool && $tem_cache && $data_prog_fim != 'N/D') {
-                 if ($diffMinutos($data_prog_fim, $valor_cache) > $tolerancia) $atraso_percurso = true;
-             }
-
-             if ($atraso_percurso) {
-                 $status_html = ($diff_saida > $tolerancia) 
-                    ? '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>' 
-                    : '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
-             } elseif ($diff_saida > $tolerancia) {
-                 $status_html = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
-             } else {
-                 $status_html = '<span class="badge bg-success rounded-pill">Pontual</span>';
-             }
-        }
-
-        $tr_attr = ($atraso_saida ? 'data-atraso-tipo="saida"' : '') . ' data-sentido-ida="' . $sentido_ida_attr . '" data-id-linha="' . htmlspecialchars($id_linha) . '"';
-        $placa_clean = htmlspecialchars($linha['veiculo']['veiculo'] ?? '', ENT_QUOTES);
-        $ja_saiu = ($real != 'N/D');
-        $deve_calcular = ($ja_saiu && ($linha['categoria'] ?? '') != 'Carro desligado' && !$tem_cache) ? 'true' : 'false';
-        
-        $classe_prev = "text-muted";
-        if ($tem_cache && $data_prog_fim != 'N/D') {
-             $classe_prev = ($valor_cache > $data_prog_fim) ? "text-danger fw-bold" : "text-success fw-bold";
-        }
-        
-        // Output da Linha
-        echo "<tr $tr_attr>
-            <td>".htmlspecialchars($linha['empresa']['nome'] ?? 'N/D')."</td>
-            <td>".htmlspecialchars($linha['descricaoLinha'] ?? 'N/D')." $icon_sentido</td>
-            <td class='fw-bold text-primary'>$placa_clean</td>
-            <td id='prev-ini-$placa_clean' class='text-muted small'>--:--</td>
-            <td class='".($atraso_saida ? 'text-danger fw-bold' : '')."'>".htmlspecialchars($prog)."</td>
-            <td>".htmlspecialchars($real)."</td>
-            <td><strong>".htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D')."</strong></td>
-            <td id='prev-fim-$placa_clean' class='$classe_prev celula-previsao' 
-                data-placa='$placa_clean' 
-                data-prog-fim='$data_prog_fim' 
-                data-ts-cache='$timestamp_cache' 
-                data-calcular='$deve_calcular' 
-                data-id-linha='".htmlspecialchars($id_linha)."'>$valor_cache</td>
-            <td title='".htmlspecialchars($linha['ultimaData'] ?? '')."'>".htmlspecialchars($linha['ultimaData'] ?? 'N/D')."</td>
-            <td>$status_html</td>
-            <td class='text-center'>
-                <button class='btn btn-outline-primary btn-xs rounded-circle' onclick=\"buscarRastreamentoinicial('$placa_clean', '".htmlspecialchars($linha['localinicial'] ?? 'N/D', ENT_QUOTES)."', '".htmlspecialchars($prog, ENT_QUOTES)."', '".htmlspecialchars($id_linha)."', this)\"><i class='bi bi-clock'></i></button>
-            </td>
-            <td class='text-center'>
-                <button class='btn btn-primary btn-sm rounded-circle shadow-sm' onclick=\"buscarRastreamento('$placa_clean', '".htmlspecialchars($linha['localfinal'] ?? 'N/D', ENT_QUOTES)."', '".htmlspecialchars($linha['horariofinalProgramado'] ?? 'N/D', ENT_QUOTES)."', '".htmlspecialchars($id_linha)."', this)\"><i class='bi bi-geo-alt-fill'></i></button>
-            </td>
-        </tr>";
-    }
+if (!$dados_dashboard) {
+    $dados_dashboard = handle_index_data($empresas_permitidas);
     
-    if ($contador === 0) {
-        echo '<tr><td colspan="12" class="text-center py-4 text-muted">Nenhum veículo encontrado com os filtros selecionados.</td></tr>';
+    // Minificação de Chaves (Mapping)
+    $linhas_otimizadas = [];
+    foreach ($dados_dashboard['todas_linhas'] as $l) {
+        $sIdaRaw = $l['sentidoIDA'] ?? $l['sentidoIda'] ?? true;
+        $sentidoBool = filter_var($sIdaRaw, FILTER_VALIDATE_BOOLEAN);
+        $linhas_otimizadas[] = [
+            'id' => $l['idLinha'] ?? '',
+            'e'  => $l['empresa']['nome'] ?? '',
+            'r'  => $l['descricaoLinha'] ?? '',
+            'v'  => $l['veiculo']['veiculo'] ?? '',
+            's'  => $sentidoBool ? 1 : 0,
+            'pi' => $l['horarioProgramado'] ?? '',
+            'ri' => $l['horarioReal'] ?? '',
+            'pf' => $l['horariofinalProgramado']??'',
+            'li' => $l['localinicial'] ?? '',
+            'lf' => $l['localfinal'] ?? '',
+            'ts' => $l['previsao_fim_ts'] ?? 0,
+            'u'  => $l['ultimaData'] ?? '',
+            'c'  => $l['categoria'] ?? ''
+        ];
     }
+    $dados_dashboard['todas_linhas'] = $linhas_otimizadas;
+    file_put_contents($cacheFile, json_encode($dados_dashboard));
 }
 
-// --- AJAX HANDLER (OTIMIZAÇÃO) ---
-// Se a requisição for AJAX pedindo apenas o corpo da tabela, retorna e encerra.
+extract($dados_dashboard); 
+
+$lista_empresas_unicas = [];
+foreach ($todas_linhas as $l) {
+    if (!empty($l['e'])) $lista_empresas_unicas[$l['e']] = $l['e'];
+}
+asort($lista_empresas_unicas);
+
+// --- AJAX API (ETag + JSON Minificado) ---
 if (isset($_GET['ajax_tbody'])) {
-    renderizar_linhas_tabela($todas_linhas, $filtro_empresa, $filtro_sentido, $hora_atual);
-    exit; // Encerra o script aqui para não renderizar o HTML completo novamente
+    header('Content-Type: application/json');
+    $payload = json_encode(['d' => $todas_linhas, 'h' => $hora_atual]);
+    $etag = md5($payload);
+    
+    if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && trim($_SERVER['HTTP_IF_NONE_MATCH']) === $etag) {
+        header("HTTP/1.1 304 Not Modified");
+        exit;
+    }
+    header("ETag: $etag");
+    echo $payload;
+    exit;
 }
 ?>
 <!DOCTYPE html>
@@ -166,15 +92,82 @@ if (isset($_GET['ajax_tbody'])) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Viação Mimo - Dashboard</title>
+    
+    <link rel="preconnect" href="https://unpkg.com" crossorigin>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+
     <style>
-    body{background-color:#f8f9fa;font-family:'Segoe UI',sans-serif;overflow-x:hidden}.sidebar{background-color:#0b1f3a;color:#fff;min-height:100vh;width:250px;position:fixed;z-index:1000;transition:all .3s ease;overflow-y:auto}.sidebar a{color:#d1d5db;display:flex;align-items:center;padding:14px 20px;text-decoration:none;border-left:4px solid transparent;font-weight:500;white-space:nowrap;overflow:hidden}.sidebar a i{min-width:30px;font-size:1.1rem}.sidebar a.active,.sidebar a:hover{background-color:#1b2e52;color:#fff;border-left-color:#0d6efd}.sidebar .logo-container img{transition:all .3s;max-width:160px}.sidebar.toggled{width:80px}.sidebar.toggled .logo-container img{max-width:50px}.sidebar.toggled a span{display:none}.sidebar.toggled a{justify-content:center;padding:14px 0}.sidebar.toggled a i{margin-right:0!important}.content{margin-left:250px;padding:30px;transition:all .3s ease}.content.toggled{margin-left:80px}.card-summary{border-radius:12px;padding:20px;color:#fff;text-align:center;position:relative;overflow:hidden;box-shadow:0 4px 6px rgba(0,0,0,.1)}.card-summary h5{font-size:.9rem;opacity:.9;margin-bottom:5px;text-transform:uppercase}.card-summary h3{font-size:2rem;font-weight:700;margin:0}.card-blue{background:linear-gradient(135deg,#0b1f3a 0,#1e3a8a 100%)}.card-red{background:linear-gradient(135deg,#b91c1c 0,#dc2626 100%)}.card-green{background:linear-gradient(135deg,#047857 0,#10b981 100%)}.bg-secondary{background:linear-gradient(135deg,#4b5563 0,#6b7280 100%)!important}.bg-info{background:linear-gradient(135deg,#0891b2 0,#06b6d4 100%)!important}.bg-warning{background:linear-gradient(135deg,#f59e0b 0,#d97706 100%)!important}.table-responsive{background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.05);padding:5px}.table thead{background-color:#f1f5f9}.table thead th{color:#475569;font-weight:600;border-bottom:2px solid #e2e8f0;padding:15px;cursor:pointer;white-space:nowrap}.table tbody td{padding:15px;vertical-align:middle;color:#334155;white-space:normal}th:hover{background-color:#e2e8f0;color:#0f172a}.search-bar{border-radius:20px;border:1px solid #cbd5e1;padding-left:40px;height:45px}.search-icon{position:absolute;left:15px;top:12px;color:#94a3b8}.modal-content{border:none;border-radius:16px;overflow:hidden}#mapaRota{height:550px;width:100%;background-color:#e9ecef;z-index:1}.leaflet-routing-container{display:none!important}.mini-loader{width:1rem;height:1rem;border-width:.15em}.table-ultra-compact{font-size:.9rem}.table-ultra-compact td,.table-ultra-compact th{padding-top:2px!important;padding-bottom:2px!important;padding-left:4px!important;padding-right:4px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}.col-narrow{width:1%;white-space:nowrap}.bi{font-size:.9em}.btn-xs{padding:.1rem .3rem;font-size:.7rem;line-height:1}.blink-animation{animation:blinker 1.5s linear infinite}@keyframes blinker{50%{opacity:.5}}.filter-bar{background-color:#fff;border-radius:12px;padding:15px;margin-bottom:20px;box-shadow:0 2px 5px rgba(0,0,0,.05)}
+    body{background-color:#f8f9fa;font-family:'Segoe UI',sans-serif;overflow-x:hidden}
+    
+    /* Layout */
+    .sidebar{background-color:#0b1f3a;color:#fff;min-height:100vh;width:250px;position:fixed;z-index:1000;transition:all .3s ease;overflow-y:auto}
+    .sidebar a{color:#d1d5db;display:flex;align-items:center;padding:14px 20px;text-decoration:none;border-left:4px solid transparent;font-weight:500;white-space:nowrap;overflow:hidden}
+    .sidebar a i{min-width:30px;font-size:1.1rem}
+    .sidebar a.active,.sidebar a:hover{background-color:#1b2e52;color:#fff;border-left-color:#0d6efd}
+    .sidebar .logo-container img{transition:all .3s;max-width:160px}
+    .sidebar.toggled{width:80px}
+    .sidebar.toggled .logo-container img{max-width:50px}
+    .sidebar.toggled a span{display:none}.sidebar.toggled a{justify-content:center;padding:14px 0}
+    .sidebar.toggled a i{margin-right:0!important}
+    .content{margin-left:250px;padding:30px;transition:all .3s ease}
+    .content.toggled{margin-left:80px}
+    
+    /* OTIMIZAÇÃO: CONTENT VISIBILITY & CONTAINMENT */
+    .card-summary, .filter-bar, .modal-content { content-visibility: auto; contain-intrinsic-size: 100px 100px; }
+    
+    /* Performance de Tabela: Cada linha é isolada do layout global */
+    .table tbody tr { contain: layout style; }
+
+    /* Estilos Visuais */
+    .card-summary{border-radius:12px;padding:20px;color:#fff;text-align:center;position:relative;overflow:hidden;box-shadow:0 4px 6px rgba(0,0,0,.1)}
+    .card-summary h5{font-size:.9rem;opacity:.9;margin-bottom:5px;text-transform:uppercase}
+    .card-summary h3{font-size:2rem;font-weight:700;margin:0}
+    .card-blue{background:linear-gradient(135deg,#0b1f3a 0,#1e3a8a 100%)}
+    .card-red{background:linear-gradient(135deg,#b91c1c 0,#dc2626 100%)}
+    .card-green{background:linear-gradient(135deg,#047857 0,#10b981 100%)}
+    .bg-secondary{background:linear-gradient(135deg,#4b5563 0,#6b7280 100%)!important}
+    .bg-info{background:linear-gradient(135deg,#0891b2 0,#06b6d4 100%)!important}
+    .bg-warning{background:linear-gradient(135deg,#f59e0b 0,#d97706 100%)!important}
+    
+    .table-responsive{background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.05);padding:5px}
+    .table thead{background-color:#f1f5f9}
+    .table thead th{color:#475569;font-weight:600;border-bottom:2px solid #e2e8f0;padding:15px;cursor:pointer;white-space:nowrap}
+    .table tbody td{padding:15px;vertical-align:middle;color:#334155;white-space:normal}
+    th:hover{background-color:#e2e8f0;color:#0f172a}
+    
+    .search-bar{border-radius:20px;border:1px solid #cbd5e1;padding-left:40px;height:45px}
+    .search-icon{position:absolute;left:15px;top:12px;color:#94a3b8}
+    .modal-content{border:none;border-radius:16px;overflow:hidden}
+    #mapaRota{height:550px;width:100%;background-color:#e9ecef;z-index:1}
+    .leaflet-routing-container{display:none!important}
+    .mini-loader{width:1rem;height:1rem;border-width:.15em}
+    .table-ultra-compact{font-size:.9rem}
+    .table-ultra-compact td,.table-ultra-compact th{padding-top:2px!important;padding-bottom:2px!important;padding-left:4px!important;padding-right:4px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+    .col-narrow{width:1%;white-space:nowrap}
+    .bi{font-size:.9em}
+    .btn-xs{padding:.1rem .3rem;font-size:.7rem;line-height:1}
+    .blink-animation{animation:blinker 1.5s linear infinite}
+    @keyframes blinker{50%{opacity:.5}}
+    .filter-bar{background-color:#fff;border-radius:12px;padding:15px;margin-bottom:20px;box-shadow:0 2px 5px rgba(0,0,0,.05)}
+    
+    .skeleton { background: #e0e0e0; border-radius: 4px; animation: shimmer 1.5s infinite linear; }
+    .skeleton-text { height: 12px; margin-bottom: 6px; width: 100%; }
+    .skeleton-block { height: 100px; width: 100%; }
+    @keyframes shimmer { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
     </style>
 </head>
 <body>
+
+<script>
+    // Injection de Dados Compactados
+    window.dadosIniciais = <?php echo json_encode($todas_linhas); ?>;
+    window.horaServidorInicial = "<?php echo $hora_atual; ?>";
+</script>
 
 <div class="sidebar d-flex flex-column" id="sidebar">
     <div class="text-center py-4 bg-dark bg-opacity-25 logo-container">
@@ -191,11 +184,6 @@ if (isset($_GET['ajax_tbody'])) {
             <i class="bi <?php echo $item['icon']; ?> me-2"></i><span><?php echo $item['label']; ?></span>
         </a>
     <?php endif; endforeach; ?>
-    <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
-        <a href="admin.php" title="Usuários" class="<?php echo ($pagina_atual == 'admin.php') ? 'active' : ''; ?>">
-            <i class="bi bi-people-fill me-2"></i><span>Usuários</span>
-        </a>
-    <?php endif; ?>
     <a href="logout.php" class="mt-auto text-danger border-top border-secondary" title="Sair">
         <i class="bi bi-box-arrow-right me-2"></i><span>Sair</span>
     </a>
@@ -205,27 +193,24 @@ if (isset($_GET['ajax_tbody'])) {
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div class="d-flex align-items-center gap-3">
             <button class="btn btn-outline-dark border-0 shadow-sm" id="btnToggleMenu"><i class="bi bi-list fs-5"></i></button>
-            <div><h4 class="fw-bold text-dark mb-1">Visão Geral da Frota</h4><p class="text-muted small mb-0">Monitoramento em tempo real</p></div>
+            <div><h4 class="fw-bold text-dark mb-1">Visão Geral da Frota</h4><p class="text-muted small mb-0">Monitoramento em tempo real <?php if($usando_cache) echo '<span class="badge bg-light text-secondary border">⚡ Cache</span>'; ?></p></div>
         </div>
         <div class="d-flex gap-2 w-50 justify-content-end">
-            <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
-            <button class="btn btn-sm btn-dark" onclick="mostrarDebug()"><i class="bi bi-bug"></i> Debug</button>
-            <?php endif; ?>
             <div class="position-relative w-50">
                 <i class="bi bi-search search-icon"></i>
-                <input type="text" id="searchInput" class="form-control search-bar" placeholder="Buscar na tela (Texto)...">
+                <input type="text" id="searchInput" class="form-control search-bar" placeholder="Busca Inteligente (Placa, Linha, Empresa)...">
             </div>
         </div>
     </div>
 
     <div class="filter-bar">
-        <form method="GET" class="row g-2 align-items-center" id="filterForm">
+        <div class="row g-2 align-items-center" id="filterArea">
             <div class="col-md-3">
                 <label class="form-label small fw-bold text-secondary mb-1">Empresa:</label>
-                <select name="empresa" class="form-select form-select-sm" onchange="this.form.submit()">
+                <select id="filtroEmpresa" class="form-select form-select-sm" onchange="aplicarFiltrosFrontend()">
                     <option value="">Todas as Empresas</option>
                     <?php foreach ($lista_empresas_unicas as $emp_nome): ?>
-                        <option value="<?php echo htmlspecialchars($emp_nome); ?>" <?php echo ($filtro_empresa === $emp_nome) ? 'selected' : ''; ?>>
+                        <option value="<?php echo htmlspecialchars($emp_nome); ?>">
                             <?php echo htmlspecialchars($emp_nome); ?>
                         </option>
                     <?php endforeach; ?>
@@ -233,10 +218,10 @@ if (isset($_GET['ajax_tbody'])) {
             </div>
             <div class="col-md-3">
                 <label class="form-label small fw-bold text-secondary mb-1">Sentido:</label>
-                <select name="sentido" class="form-select form-select-sm" onchange="this.form.submit()">
+                <select id="filtroSentido" class="form-select form-select-sm" onchange="aplicarFiltrosFrontend()">
                     <option value="">Todos os Sentidos</option>
-                    <option value="ida" <?php echo ($filtro_sentido === 'ida') ? 'selected' : ''; ?>>➡️ IDA</option>
-                    <option value="volta" <?php echo ($filtro_sentido === 'volta') ? 'selected' : ''; ?>>⬅️ VOLTA</option>
+                    <option value="ida">➡️ IDA</option>
+                    <option value="volta">⬅️ VOLTA</option>
                 </select>
             </div>
             <div class="col-md-4">
@@ -251,12 +236,7 @@ if (isset($_GET['ajax_tbody'])) {
                     <option value="aguardando">⏳ Aguardando</option>
                 </select>
             </div>
-            <?php if (!empty($filtro_empresa) || !empty($filtro_sentido)): ?>
-            <div class="col-auto align-self-end">
-                <a href="/" class="btn btn-outline-danger btn-sm mb-1"><i class="bi bi-x-circle me-1"></i>Limpar</a>
-            </div>
-            <?php endif; ?>
-        </form>
+        </div>
     </div>
 
     <div class="row g-3 mb-4">
@@ -274,36 +254,25 @@ if (isset($_GET['ajax_tbody'])) {
                 <table class="table table-hover table-sm table-ultra-compact align-middle mb-0">
                     <thead>
                         <tr>
-                            <th onclick="ordenarTabela(0)">Empresa <i class="bi bi-arrow-down-up small"></i></th>
-                            <th onclick="ordenarTabela(1)">Rota <i class="bi bi-arrow-down-up small"></i></th>
-                            <th onclick="ordenarTabela(2)">Veículo <i class="bi bi-arrow-down-up small"></i></th>
+                            <th onclick="ordenarTabela('e')">Empresa <i class="bi bi-arrow-down-up small"></i></th>
+                            <th onclick="ordenarTabela('r')">Rota <i class="bi bi-arrow-down-up small"></i></th>
+                            <th onclick="ordenarTabela('v')">Veículo <i class="bi bi-arrow-down-up small"></i></th>
                             <th class="col-narrow" title="Previsão Início"> Prev. Ini</th>
-                            <th onclick="ordenarTabela(4)">Prog. Início <i class="bi bi-arrow-down-up small"></i></th>
-                            <th onclick="ordenarTabela(5)">Real Início <i class="bi bi-arrow-down-up small"></i></th>
-                            <th onclick="ordenarTabela(6)">Prog. Fim <i class="bi bi-arrow-down-up small"></i></th>
+                            <th onclick="ordenarTabela('pi')">Prog. Início <i class="bi bi-arrow-down-up small"></i></th>
+                            <th onclick="ordenarTabela('ri')">Real Início <i class="bi bi-arrow-down-up small"></i></th>
+                            <th onclick="ordenarTabela('pf')">Prog. Fim <i class="bi bi-arrow-down-up small"></i></th>
                             <th class="col-narrow" title="Previsão Fim">Prev. Fim</th>
-                            <th onclick="ordenarTabela(8)">Ultimo Reporte <i class="bi bi-arrow-down-up small"></i></th>
-                            <th onclick="ordenarTabela(9)">Status <i class="bi bi-arrow-down-up small"></i></th>
+                            <th onclick="ordenarTabela('u')">Ultimo Reporte <i class="bi bi-arrow-down-up small"></i></th>
+                            <th onclick="ordenarTabela('st')">Status <i class="bi bi-arrow-down-up small"></i></th>
                             <th class="text-center">Prev. Inicial</th>
                             <th class="text-center">Prev. Final</th>
                         </tr>
                     </thead>
-                    <tbody id="tabela-veiculos">
-                        <?php renderizar_linhas_tabela($todas_linhas, $filtro_empresa, $filtro_sentido, $hora_atual); ?>
-                    </tbody>
+                    <tbody id="tabela-veiculos"></tbody>
                 </table>
             </div>
         </div>
     </div>
-</div>
-
-<div class="modal fade" id="debugModal" tabindex="-1">
-  <div class="modal-dialog modal-lg">
-    <div class="modal-content">
-      <div class="modal-header bg-dark text-white"><h5 class="modal-title">🐛 JSON 1º Veículo</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
-      <div class="modal-body"><textarea class="form-control" rows="15" style="font-family: monospace; font-size: 0.8rem;"><?php echo $primeiro_veiculo_json; ?></textarea></div>
-    </div>
-  </div>
 </div>
 
 <div class="modal fade" id="popupResultado" tabindex="-1" aria-hidden="true">
@@ -315,8 +284,8 @@ if (isset($_GET['ajax_tbody'])) {
         <div id="mapaRota"></div>
         <div class="d-flex justify-content-center gap-3 py-2 small bg-light border-top">
             <span class="d-flex align-items-center"><i class="bi bi-circle-fill me-1"></i> Rota Percorrida</span>
-            <span class="d-flex align-items-center"><i class="bi bi-circle-fill text-danger me-1"></i> Rota Fixa (Oficial)</span>
-            <span class="d-flex align-items-center"><i class="bi bi-circle-fill text-primary me-1"></i> Previsão Futura</span>
+            <span class="d-flex align-items-center"><i class="bi bi-circle-fill text-danger me-1"></i> Rota Fixa</span>
+            <span class="d-flex align-items-center"><i class="bi bi-circle-fill text-primary me-1"></i> Previsão</span>
         </div>
       </div>
     </div>
@@ -336,154 +305,318 @@ if (isset($_GET['ajax_tbody'])) {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
 
 <script>
+if ('serviceWorker' in navigator) {
+    // Registra SW fictício apenas para criar cache de assets (pode ser expandido)
+    // Para produção real, crie um arquivo sw.js. Aqui deixamos preparado.
+    // navigator.serviceWorker.register('/sw.js');
+}
+</script>
+
+<script>
+// --- VARIÁVEIS GLOBAIS ---
 let mapaInstancia = null;
-let routingControlFuture = null; 
-let direcaoAtual = {};
+let mapaLayerGroup = null; 
+let routingControl = null; 
 let currentController = null; 
 let renderToken = 0;
+let direcaoAtual = {};
 
-function mostrarDebug() { new bootstrap.Modal(document.getElementById('debugModal')).show(); }
+let todosDadosVeiculos = window.dadosIniciais || [];
+let horaServidorAtual = window.horaServidorInicial || "00:00";
+let fuseInstance = null;
+
+// OTIMIZAÇÃO 3: MEMOIZATION MAP (Cache de strings HTML)
+const htmlCache = new Map();
+
+const fuseOptions = {
+    keys: ['v', 'e', 'r', 'li', 'lf'], 
+    threshold: 0.3, 
+    ignoreLocation: true
+};
 
 document.addEventListener("DOMContentLoaded", function() {
+    const empSalva = localStorage.getItem('filtro_empresa');
+    const sentSalvo = localStorage.getItem('filtro_sentido');
+    if(empSalva) document.getElementById('filtroEmpresa').value = empSalva;
+    if(sentSalvo) document.getElementById('filtroSentido').value = sentSalvo;
+
+    fuseInstance = new Fuse(todosDadosVeiculos, fuseOptions);
+
+    if(document.getElementById('mapaRota')) {
+        // preferCanvas para performance de desenho
+        mapaInstancia = L.map('mapaRota', { preferCanvas: true }).setView([-23.5505, -46.6333], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(mapaInstancia);
+        mapaLayerGroup = L.layerGroup().addTo(mapaInstancia);
+    }
+
     const modalElement = document.getElementById('popupResultado');
     modalElement.addEventListener('shown.bs.modal', function () { if (mapaInstancia) mapaInstancia.invalidateSize(); });
     modalElement.addEventListener('hidden.bs.modal', function () {
         if (currentController) { currentController.abort(); currentController = null; }
-        renderToken++; limparMapaSeguro();
+        renderToken++; 
+        if(mapaLayerGroup) mapaLayerGroup.clearLayers(); 
+        if (routingControl && mapaInstancia) { 
+            mapaInstancia.removeControl(routingControl); 
+            routingControl = null; 
+        }
+        document.getElementById("mapaRota").style.visibility = 'hidden'; 
+    });
+
+    renderizarTabelaCompleta();
+
+    document.getElementById('tabela-veiculos').addEventListener('click', function(e) {
+        const btn = e.target.closest('.btn-acao-mapa');
+        if(btn) {
+            const tr = btn.closest('tr');
+            try {
+                const data = JSON.parse(tr.getAttribute('data-json'));
+                const tipo = btn.getAttribute('data-tipo');
+                if(tipo === 'inicial') buscarRastreamentoinicial(data.v, data.li, data.pi, data.id, btn);
+                else buscarRastreamento(data.v, data.lf, data.pf, data.id, btn);
+            } catch(err) { console.error("Erro dados linha", err); }
+        }
     });
 
     const searchInput = document.getElementById('searchInput');
     let timeoutSearch = null;
     if (searchInput) {
-        searchInput.addEventListener('keyup', function() {
+        searchInput.addEventListener('input', function() {
             clearTimeout(timeoutSearch);
-            timeoutSearch = setTimeout(aplicarFiltrosFrontend, 300); // Debounce
+            timeoutSearch = setTimeout(aplicarFiltrosFrontend, 250); 
         });
     }
 
     verificarAlertas();
-    carregarPrevisoesAutomaticamente();
     iniciarAtualizacaoAutomatica();
-    atualizarCardsResumo(); 
     
-    // Toggle Sidebar
     const btnToggle = document.getElementById('btnToggleMenu');
-    const sidebar = document.getElementById('sidebar');
-    const content = document.getElementById('content');
     if (btnToggle) {
         btnToggle.addEventListener('click', function() {
-            sidebar.classList.toggle('toggled');
-            content.classList.toggle('toggled');
+            document.getElementById('sidebar').classList.toggle('toggled');
+            document.getElementById('content').classList.toggle('toggled');
             setTimeout(() => { if (mapaInstancia) mapaInstancia.invalidateSize(); }, 350);
         });
     }
 });
 
-function aplicarFiltrosFrontend() {
-    const termoBusca = document.getElementById('searchInput')?.value.toLowerCase() || '';
-    const statusFiltro = document.getElementById('filtroStatusJS')?.value || '';
-    const linhas = document.querySelectorAll("#tabela-veiculos tr");
-    const celulasParaCalcular = [];
-
-    linhas.forEach(linha => {
-        if (linha.cells.length < 10) return; // Ignora linha de "Nenhum resultado"
-        
-        const textoLinha = linha.textContent.toLowerCase();
-        const matchTexto = !termoBusca || textoLinha.includes(termoBusca);
-        
-        let matchStatus = true;
-        if (statusFiltro) {
-            const textoStatus = linha.cells[9].innerText.toLowerCase();
-            if (statusFiltro === 'atrasado_geral') matchStatus = textoStatus.includes('atrasado');
-            else if (statusFiltro === 'atrasado_saida') matchStatus = textoStatus.includes('(inicial)') || textoStatus.includes('(p. inicial)');
-            else if (statusFiltro === 'atrasado_percurso') matchStatus = textoStatus.includes('(percurso)');
-            else if (statusFiltro === 'pontual') matchStatus = textoStatus.includes('pontual');
-            else if (statusFiltro === 'desligado') matchStatus = textoStatus.includes('desligado');
-            else if (statusFiltro === 'aguardando') matchStatus = textoStatus.includes('aguardando');
-        }
-
-        if (matchTexto && matchStatus) {
-            linha.style.display = "";
-            const celulaPrev = linha.querySelector('.celula-previsao');
-            if (celulaPrev && celulaPrev.innerText.includes('--:--')) celulasParaCalcular.push(celulaPrev);
-        } else {
-            linha.style.display = "none";
-        }
-    });
-
-    atualizarCardsResumo();
-    if (celulasParaCalcular.length > 0) carregarPrevisoesAutomaticamente(celulasParaCalcular);
+function aplicarFiltrosFrontend() { 
+    localStorage.setItem('filtro_empresa', document.getElementById('filtroEmpresa').value);
+    localStorage.setItem('filtro_sentido', document.getElementById('filtroSentido').value);
+    renderizarTabelaCompleta(); 
 }
 
-function revisarStatusTimeBased() {
-    const linhas = document.querySelectorAll("#tabela-veiculos tr");
-    const agora = new Date();
-    const horaAtualStr = String(agora.getHours()).padStart(2, '0') + ":" + String(agora.getMinutes()).padStart(2, '0');
-    let houveMudanca = false;
+function renderizarTabelaCompleta() {
+    requestAnimationFrame(() => {
+        const termoBusca = document.getElementById('searchInput')?.value || '';
+        const emp = document.getElementById('filtroEmpresa')?.value || '';
+        const sentido = document.getElementById('filtroSentido')?.value || '';
+        const status = document.getElementById('filtroStatusJS')?.value || '';
 
-    linhas.forEach(row => {
-        if(row.cells.length < 10) return;
-        const statusCell = row.cells[9];
-        const progInicio = row.cells[4].innerText.trim();
-        const realInicio = row.cells[5].innerText.trim();
-        const textoStatus = statusCell.innerText.trim();
-
-        if ((realInicio === 'N/D' || realInicio === '') && !textoStatus.includes('Desligado')) {
-            const diff = calcularDiferencaMinutos(progInicio, horaAtualStr);
-            if (diff > 10) {
-                if (!textoStatus.includes('Atrasado')) {
-                    statusCell.innerHTML = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
-                    houveMudanca = true;
-                }
-            } else if (!textoStatus.includes('Aguardando')) {
-                statusCell.innerHTML = '<span class="badge bg-light text-dark border">Aguardando</span>';
-                houveMudanca = true;
-            }
+        let dadosFiltrados = todosDadosVeiculos;
+        if (termoBusca.length > 0) {
+            const resultados = fuseInstance.search(termoBusca);
+            dadosFiltrados = resultados.map(r => r.item); 
         }
+
+        dadosFiltrados = dadosFiltrados.filter(l => {
+            if (emp && l.e !== emp) return false; 
+            const sentidoStr = l.s ? 'ida' : 'volta'; 
+            if (sentido && sentidoStr !== sentido) return false;
+            return true;
+        });
+
+        if (status) {
+            dadosFiltrados = dadosFiltrados.filter(l => {
+                const tempHtml = montarHTMLLinha(l, horaServidorAtual); 
+                if (status === 'atrasado_geral') return tempHtml.includes('atrasado');
+                if (status === 'atrasado_saida') return tempHtml.includes('(Inicial)') || tempHtml.includes('(P. Inicial)');
+                if (status === 'atrasado_percurso') return tempHtml.includes('(Percurso)');
+                if (status === 'pontual') return tempHtml.includes('Pontual');
+                if (status === 'desligado') return tempHtml.includes('Desligado');
+                if (status === 'aguardando') return tempHtml.includes('Aguardando');
+                return true;
+            });
+        }
+
+        const tbody = document.getElementById('tabela-veiculos');
+        if (dadosFiltrados.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="12" class="text-center py-4 text-muted">Nenhum veículo encontrado.</td></tr>';
+        } else {
+            tbody.innerHTML = dadosFiltrados.map(l => montarHTMLLinha(l, horaServidorAtual)).join('');
+        }
+        
+        atualizarCardsResumo(); 
+        carregarPrevisoesAutomaticamente(); 
     });
-    if (houveMudanca) { aplicarFiltrosFrontend(); atualizarCardsResumo(); }
+}
+
+function montarHTMLLinha(l, horaServidor) {
+    // --- OTIMIZAÇÃO 3: MEMOIZATION (Se a linha não mudou, retorna cache) ---
+    // Criamos uma chave única baseada no ID e no Timestamp de cache + hora atual (para o calculo de atraso)
+    // Se o horário mudou, precisamos recalcular. Se não, cache.
+    // Nota: Como 'horaServidor' muda a cada 30s, o cache dura 30s. Suficiente.
+    const cacheKey = `${l.id}-${l.ts}-${l.ri}-${horaServidor}`;
+    if(htmlCache.has(cacheKey)) {
+        return htmlCache.get(cacheKey);
+    }
+
+    const tolerancia = 10;
+    const prog = l.pi || '23:59';
+    const real = l.ri || 'N/D';
+    const dataProgFim = l.pf || 'N/D';
+    const placaClean = l.v;
+    const idLinha = l.id || '';
+    const iconSentido = l.s ? '<i class="bi bi-arrow-right-circle-fill text-primary ms-1" title="IDA"></i>' : '<i class="bi bi-arrow-left-circle-fill text-warning ms-1" title="VOLTA"></i>';
+    const timestampCache = l.ts || '';
+    const temCache = timestampCache !== 0 && timestampCache !== '';
+    const valorCache = temCache ? new Date(parseInt(timestampCache) * 1000).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'}) : '--:--';
+
+    let statusHtml = '';
+    let atrasoSaida = false;
+    let atrasoPercurso = false;
+
+    const diffMin = (h1, h2) => {
+        if(h1=='N/D'||h2=='N/D'||!h1||!h2) return 0;
+        const [hA, mA] = h1.split(':').map(Number);
+        const [hB, mB] = h2.split(':').map(Number);
+        return (hB*60+mB) - (hA*60+mA);
+    };
+
+    if (l.c === 'Carro desligado') {
+        statusHtml = '<span class="badge bg-secondary rounded-pill">Desligado</span>';
+    } else if (real === 'N/D' || !real) {
+        const diff = diffMin(prog, horaServidor);
+        if (diff > tolerancia) {
+            atrasoSaida = true;
+            statusHtml = '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>';
+        } else {
+            statusHtml = '<span class="badge bg-light text-dark border">Aguardando</span>';
+        }
+    } else {
+        const diffSaida = diffMin(prog, real);
+        if (l.s && temCache && dataProgFim !== 'N/D') {
+            if (diffMin(dataProgFim, valorCache) > tolerancia) atrasoPercurso = true;
+        }
+        if (atrasoPercurso) {
+            statusHtml = (diffSaida > tolerancia) ? '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>' : '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
+        } else if (diffSaida > tolerancia) {
+            statusHtml = '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>';
+        } else {
+            statusHtml = '<span class="badge bg-success rounded-pill">Pontual</span>';
+        }
+    }
+
+    const classePrev = (temCache && dataProgFim !== 'N/D' && valorCache > dataProgFim) ? "text-danger fw-bold" : "text-success fw-bold";
+    const metaData = JSON.stringify({ v: placaClean, id: idLinha, li: l.li||'N/D', lf: l.lf||'N/D', pi: prog, pf: dataProgFim });
+    const deveCalcular = (real !== 'N/D' && l.c !== 'Carro desligado' && !temCache) ? 'true' : 'false';
+
+    const html = `<tr data-atraso-tipo="${atrasoSaida?'saida':''}" data-json='${metaData}'>
+        <td>${l.e || 'N/D'}</td>
+        <td>${l.r || 'N/D'} ${iconSentido}</td>
+        <td class='fw-bold text-primary'>${placaClean}</td>
+        <td id='prev-ini-${placaClean}' class='text-muted small'>--:--</td>
+        <td class='${atrasoSaida?'text-danger fw-bold':''}'>${prog}</td>
+        <td>${real}</td>
+        <td><strong>${dataProgFim}</strong></td>
+        <td id='prev-fim-${placaClean}' class='${classePrev} celula-previsao' data-placa='${placaClean}' data-prog-fim='${dataProgFim}' data-ts-cache='${timestampCache}' data-calcular='${deveCalcular}' data-id-linha='${idLinha}'>${valorCache}</td>
+        <td title='${l.u||''}'>${l.u||'N/D'}</td>
+        <td>${statusHtml}</td>
+        <td class='text-center'><button class='btn btn-outline-primary btn-xs rounded-circle btn-acao-mapa' data-tipo='inicial'><i class='bi bi-clock'></i></button></td>
+        <td class='text-center'><button class='btn btn-primary btn-sm rounded-circle shadow-sm btn-acao-mapa' data-tipo='final'><i class='bi bi-geo-alt-fill'></i></button></td>
+    </tr>`;
+    
+    // Salva no cache e retorna
+    htmlCache.set(cacheKey, html);
+    return html;
 }
 
 function iniciarAtualizacaoAutomatica() {
-    revisarStatusTimeBased();
     setInterval(async () => {
         try {
-            // OTIMIZAÇÃO: Busca apenas o TBODY, não a página toda.
             const urlAtual = new URL(window.location.href);
             urlAtual.searchParams.set('t', Date.now());
-            urlAtual.searchParams.set('ajax_tbody', '1'); // Flag especial
+            urlAtual.searchParams.set('ajax_tbody', '1'); 
             
             const response = await fetch(urlAtual);
-            if(response.ok) {
-                const novoTbodyHTML = await response.text();
-                const tbodyAtual = document.getElementById('tabela-veiculos');
-                if (tbodyAtual && tbodyAtual.innerHTML !== novoTbodyHTML) {
-                    tbodyAtual.innerHTML = novoTbodyHTML;
-                    carregarPrevisoesAutomaticamente();
-                    aplicarFiltrosFrontend();
-                } else {
-                    revisarStatusTimeBased();
+            if(response.status === 200) {
+                const data = await response.json(); 
+                if(data.d) { 
+                    // LIMPEZA DE MEMÓRIA: Remove referências antigas antes de atribuir novas
+                    todosDadosVeiculos = null; 
+                    todosDadosVeiculos = data.d;
+                    horaServidorAtual = data.h; 
+                    
+                    // Limpa cache se a hora mudou muito (evita memory leak infinito)
+                    if(htmlCache.size > 2000) htmlCache.clear();
+
+                    fuseInstance.setCollection(todosDadosVeiculos); 
+                    renderizarTabelaCompleta(); 
                 }
             }
-        } catch (e) { console.error("Erro refresh auto", e); }
-        
-        // Refresh visual dos badges
-        document.querySelectorAll('.celula-previsao:not(:empty)').forEach(celula => {
-            const est = celula.innerText.trim();
-            if(est !== '--:--' && est !== 'N/D') atualizarStatusBadge(celula, est, celula.getAttribute('data-prog-fim'));
-        });
+        } catch (e) { console.error("Erro refresh", e); }
     }, 30000);
 }
 
-function limparMapaSeguro() {
-    if (mapaInstancia) {
-        try { mapaInstancia.off(); mapaInstancia.remove(); } catch(e) { console.warn("Erro ao limpar mapa", e); }
-        mapaInstancia = null;
-    }
-    const divMapa = document.getElementById("mapaRota");
-    if(divMapa) divMapa.innerHTML = "";
+function atualizarCardsResumo() {
+    let counts = { total: 0, atrasados: 0, pontual: 0, desligados: 0, deslocamento: 0, semInicio: 0 };
+    document.querySelectorAll("#tabela-veiculos tr").forEach(row => {
+        if (row.cells.length < 10) return;
+        counts.total++;
+        const text = row.cells[9].innerText.trim();
+        if (text.includes("Atrasado")) {
+            if (text.includes("(Inicial)") && !text.includes("Percurso")) counts.semInicio++; 
+            else counts.atrasados++;
+        } else if (text.includes("Pontual")) counts.pontual++;
+        else if (text.includes("Desligado")) counts.desligados++;
+        else if (text.includes("Em deslocamento")) counts.deslocamento++;
+        else counts.semInicio++; 
+    });
+    const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.innerText = val; };
+    setVal('count-total', counts.total); setVal('count-atrasados', counts.atrasados); setVal('count-pontual', counts.pontual);
+    setVal('count-desligados', counts.desligados); setVal('count-deslocamento', counts.deslocamento); setVal('count-sem-inicio', counts.semInicio);
+}
+
+async function carregarPrevisoesAutomaticamente(elementosPrioritarios = null) {
+    const celulas = elementosPrioritarios || document.querySelectorAll('.celula-previsao');
+    let index = 0;
+    const batchSize = 5;
+    const processNextBatch = async () => {
+        if(index >= celulas.length) return;
+        const lote = Array.from(celulas).slice(index, index + batchSize);
+        index += batchSize;
+        await Promise.all(lote.map(async (celula) => {
+            const progFim = celula.getAttribute('data-prog-fim');
+            const tsCache = celula.getAttribute('data-ts-cache');
+            if (celula.getAttribute('data-calculando') === 'true' || (celula.innerText.trim() !== '--:--' && celula.innerText.trim() !== 'N/D')) return;
+            if (tsCache && tsCache !== '0') { 
+                const dateCache = new Date(parseInt(tsCache) * 1000);
+                const horarioCache = String(dateCache.getHours()).padStart(2,'0') + ":" + String(dateCache.getMinutes()).padStart(2,'0');
+                celula.innerText = horarioCache;
+                celula.className = (progFim !== 'N/D' && horarioCache > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
+                return;
+            }
+            if (celula.getAttribute('data-calcular') === 'true') {
+                celula.setAttribute('data-calculando', 'true');
+                celula.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
+                try {
+                    const response = await fetch(`/previsao/${celula.getAttribute('data-placa')}?idLinha=${celula.getAttribute('data-id-linha')}`);
+                    const data = await response.json();
+                    if (data.duracaoSegundos) {
+                        const chegada = new Date(new Date().getTime() + data.duracaoSegundos * 1000);
+                        const est = String(chegada.getHours()).padStart(2,'0') + ":" + String(chegada.getMinutes()).padStart(2,'0');
+                        celula.innerText = est;
+                        celula.className = (progFim !== 'N/D' && est > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
+                    } else celula.innerText = 'N/D';
+                } catch (error) { celula.innerText = 'Erro'; } 
+                finally { celula.removeAttribute('data-calculando'); }
+            }
+        }));
+        setTimeout(processNextBatch, 200); 
+    };
+    processNextBatch();
 }
 
 async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, button, tipo) {
@@ -493,12 +626,27 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
     renderToken = Date.now();
     const meuToken = renderToken;
 
-    const previsaoCell = button.closest('td'); 
+    const previsaoCell = button.closest('tr').querySelector('.celula-previsao');
     const textoOriginal = previsaoCell.innerHTML;
-    previsaoCell.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div>';
     
-    limparMapaSeguro(); 
-    document.getElementById("resultadoConteudo").innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div><p class="text-muted fw-bold">Buscando dados...</p><small class="text-muted">Linha ID: ${idLinha}</small></div>`;
+    document.getElementById("mapaRota").style.visibility = 'visible';
+    mapaLayerGroup.clearLayers(); 
+    
+    if (routingControl && mapaInstancia) { 
+        mapaInstancia.removeControl(routingControl); 
+        routingControl = null; 
+    }
+    
+    document.getElementById("resultadoConteudo").innerHTML = `
+        <div class="container-fluid px-3 pt-3">
+            <div class="skeleton skeleton-text" style="height: 30px; width: 50%"></div>
+            <div class="row g-2 mb-3">
+                <div class="col-6"><div class="skeleton skeleton-block"></div></div>
+                <div class="col-6"><div class="skeleton skeleton-block"></div></div>
+            </div>
+            <div class="text-center text-muted small">Buscando rastreamento...</div>
+        </div>
+    `;
     new bootstrap.Modal(document.getElementById("popupResultado")).show();
 
     try {
@@ -522,27 +670,12 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
                 const p = (typeof veiculoData.loc === 'string') ? veiculoData.loc.split(',') : veiculoData.loc;
                 latVeiculo = p[0]; lngVeiculo = p[1];
             }
-            
-            const enderecoAtual = veiculoData.endereco || veiculoData.loc || 'Endereço não identificado';
+            const enderecoAtual = veiculoData.endereco || veiculoData.loc || 'Localizando...';
             let horarioEstimado = '--';
             if (rotaData.duracaoSegundos) {
                  const chegada = new Date(new Date().getTime() + rotaData.duracaoSegundos * 1000);
                  horarioEstimado = String(chegada.getHours()).padStart(2, '0') + ":" + String(chegada.getMinutes()).padStart(2, '0');
             }
-
-            // Atualiza células na tabela principal se necessário
-            if (tipo === 'final' && horarioEstimado !== '--') {
-                const cell = document.getElementById('prev-fim-' + placa);
-                if (cell) {
-                    cell.innerText = horarioEstimado;
-                    cell.className = (horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'fw-bold text-danger' : 'fw-bold text-success';
-                    atualizarStatusBadge(cell, horarioEstimado, horarioFinalProg);
-                }
-            } else if (tipo === 'inicial' && horarioEstimado !== '--') {
-                const cellIni = document.getElementById('prev-ini-' + placa);
-                if (cellIni) { cellIni.innerText = horarioEstimado; cellIni.className = 'fw-bold text-info small'; }
-            }
-
             const labelProg = (tipo === 'inicial') ? 'Inicial Programado' : 'Final Programado';
             const labelEst = (tipo === 'inicial') ? 'Chegada Prevista' : 'Previsão Atualizada';
             const statusCor = (horarioEstimado !== '--' && horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'text-danger fw-bold' : (horarioEstimado !== '--' ? 'text-success fw-bold' : 'text-dark');
@@ -551,11 +684,11 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
             <div class="container-fluid px-3 pt-3">
                 <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light">
                     <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'}</h5>
-                    <span class="badge bg-success">Online</span> <span class="badge bg-secondary ms-2 small">Rota ID: ${idLinha}</span>
+                    <span class="badge bg-success">Online</span>
                 </div>
                 <div class="row g-2 mb-3">
-                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Origem</small><br><span id="txt-origem" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${enderecoAtual}</span></div></div>
-                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Destino</small><br><span id="txt-destino" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${localAlvo || 'N/D'}</span></div></div>
+                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Origem Atual</small><br><span id="txt-origem" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${enderecoAtual}</span></div></div>
+                    <div class="col-6"><div class="p-3 border rounded bg-white shadow-sm h-100"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">Destino</small><br><span id="txt-destino" class="d-block text-dark fw-semibold" style="font-size: 0.9rem;">${localAlvo || 'Calculando...'}</span></div></div>
                 </div>
                 <div class="row g-2 mb-3">
                     <div class="col-6"><div class="p-3 border rounded bg-light shadow-sm h-100 text-center"><small class="text-uppercase text-secondary fw-bold" style="font-size:0.7rem">${labelProg}</small><br><span class="d-block text-dark fw-semibold fs-4">${horarioFinalProg || 'N/D'}</span></div></div>
@@ -576,113 +709,83 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
             document.getElementById("resultadoConteudo").innerHTML = `<div class="alert alert-warning m-3 text-dark">Veículo não encontrado.</div>`;
         }
     } catch (err) {
-        if (err.name !== 'AbortError') {
-            previsaoCell.innerHTML = textoOriginal;
-            document.getElementById("resultadoConteudo").innerHTML = `<div class='alert alert-danger m-3'>Erro: ${err.message}</div>`;
-        }
+        if (err.name !== 'AbortError') document.getElementById("resultadoConteudo").innerHTML = `<div class='alert alert-danger m-3'>Erro: ${err.message}</div>`;
     }
 }
 
-async function processarEmLotes(items, limite, callback) {
-    let index = 0;
-    const executar = async () => {
-        if (index >= items.length) { atualizarCardsResumo(); return; }
-        const lote = Array.from(items).slice(index, index + limite);
-        index += limite;
-        await Promise.all(lote.map(item => callback(item)));
-        await executar();
+function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPontos=[], rastroOficial=[], rastroReal=[], tipo, tokenSolicitante) {
+    if (tokenSolicitante !== renderToken || !mapaInstancia) return;
+    latO = parseFloat(latO)|| -23.5505; lngO = parseFloat(lngO)|| -46.6333;
+    latD = parseFloat(latD)|| latO; lngD = parseFloat(lngD)|| lngO;
+
+    const icons = {
+        bus: L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/3448/3448339.png',iconSize:[38,38],iconAnchor:[19,38],popupAnchor:[0,-35]}),
+        red: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', iconSize:[25,41],iconAnchor:[12,41],popupAnchor:[1,-34]}),
+        green: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png', iconSize:[25,41],iconAnchor:[12,41],popupAnchor:[1,-34]}),
+        stopBlack: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-black.png',iconSize:[18,29],iconAnchor:[9,29],popupAnchor:[1,-25]}),
+        stopBlue: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',iconSize:[18,29],iconAnchor:[9,29],popupAnchor:[1,-25]})
     };
-    await executar();
-}
 
-function atualizarCardsResumo() {
-    let counts = { total: 0, atrasados: 0, pontual: 0, desligados: 0, deslocamento: 0, semInicio: 0 };
-    document.querySelectorAll("#tabela-veiculos tr").forEach(row => {
-        if (row.style.display === 'none' || row.cells.length < 10) return;
-        counts.total++;
-        const text = row.cells[9].innerText.trim();
-        if (text.includes("Atrasado")) {
-            if (text.includes("(Inicial)") && !text.includes("Percurso")) counts.semInicio++; 
-            else counts.atrasados++;
-        } else if (text.includes("Pontual")) counts.pontual++;
-        else if (text.includes("Desligado")) counts.desligados++;
-        else if (text.includes("Em deslocamento")) counts.deslocamento++;
-        else counts.semInicio++;
-    });
-    const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.innerText = val; };
-    setVal('count-total', counts.total); setVal('count-atrasados', counts.atrasados); setVal('count-pontual', counts.pontual);
-    setVal('count-desligados', counts.desligados); setVal('count-deslocamento', counts.deslocamento); setVal('count-sem-inicio', counts.semInicio);
-}
+    let boundsTotal = L.latLngBounds();
+    boundsTotal.extend([latO, lngO]);
 
-function calcularDiferencaMinutos(hB, hC) {
-    if (!hB || !hC || hB === 'N/D' || hC === 'N/D' || hC === '--:--') return 0;
-    const [bH, bM] = hB.split(':').map(Number);
-    const [cH, cM] = hC.split(':').map(Number);
-    return (cH * 60 + cM) - (bH * 60 + bM);
-}
-
-function atualizarStatusBadge(celula, horarioEstimado, horarioProgramado) {
-    const tr = celula.closest('tr');
-    if (!tr) return;
-    const statusCell = tr.cells[9];
-    if (!statusCell || statusCell.innerText.trim() === 'Desligado') return;
-
-    const progInicio = tr.cells[4].innerText.trim();
-    const realInicio = tr.cells[5].innerText.trim();
-    const tolerancia = 10;
-    let htmlBadge = '';
-
-    if (realInicio === 'N/D' || realInicio === '') {
-        const diffInicio = calcularDiferencaMinutos(progInicio, new Date().toTimeString().substr(0,5));
-        htmlBadge = (diffInicio > 10) ? '<span class="badge rounded-pill bg-danger blink-animation">Atrasado (Inicial)</span>' : '<span class="badge bg-light text-dark border">Aguardando</span>';
-    } else {
-        const diffSaida = calcularDiferencaMinutos(progInicio, realInicio);
-        const diffChegada = calcularDiferencaMinutos(horarioProgramado, horarioEstimado);
-        const sentidoIda = tr.getAttribute('data-sentido-ida') === 'true';
-
-        if (sentidoIda) {
-            if (diffChegada > tolerancia) htmlBadge = (diffSaida > tolerancia) ? '<span class="badge bg-danger rounded-pill">Atrasado (P. Inicial)</span>' : '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>';
-            else htmlBadge = (diffSaida < -tolerancia) ? '<span class="badge bg-info text-dark rounded-pill">Pontual (Ini. Adiantado)</span>' : (diffSaida > tolerancia) ? '<span class="badge bg-warning text-dark rounded-pill">Pontual (Ini. Atrasado)</span>' : '<span class="badge bg-success rounded-pill">Pontual</span>';
-        } else {
-            htmlBadge = (diffSaida > tolerancia) ? '<span class="badge bg-danger rounded-pill">Atrasado (Percurso)</span>' : '<span class="badge bg-success rounded-pill">Pontual</span>';
-        }
+    if (rastroOficial?.length) L.polyline(rastroOficial.map(c=>[c[1],c[0]]), {color:'#ff0505',weight:6,opacity:0.6}).addTo(mapaLayerGroup);
+    
+    let pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
+    if (pontosReais.length > 0) {
+        let line = L.polyline([...pontosReais.map(c=>[c[1],c[0]]), [latO,lngO]], {color:'#000',weight:5,opacity:0.6,dashArray:'1,6'}).addTo(mapaLayerGroup);
+        boundsTotal.extend(line.getBounds());
     }
-    if (statusCell.innerHTML !== htmlBadge) { statusCell.innerHTML = htmlBadge; aplicarFiltrosFrontend(); }
-}
 
-async function carregarPrevisoesAutomaticamente(elementosPrioritarios = null) {
-    const celulas = elementosPrioritarios || document.querySelectorAll('.celula-previsao');
-    await processarEmLotes(celulas, 5, async (celula) => {
-        const progFim = celula.getAttribute('data-prog-fim');
-        const tsCache = celula.getAttribute('data-ts-cache');
-        if (celula.getAttribute('data-calculando') === 'true' || (celula.innerText.trim() !== '--:--' && celula.innerText.trim() !== 'N/D')) return;
+    let pointsFuture = [L.latLng(latO, lngO)];
+    if (tipo === 'final' && waypoints?.length) waypoints.slice(1,-1).forEach(w => pointsFuture.push(L.latLng(w[1], w[0])));
+    pointsFuture.push(L.latLng(latD, lngD));
 
-        if (tsCache) {
-            const dateCache = new Date(parseInt(tsCache) * 1000);
-            const horarioCache = String(dateCache.getHours()).padStart(2,'0') + ":" + String(dateCache.getMinutes()).padStart(2,'0');
-            celula.innerText = horarioCache;
-            celula.className = (progFim !== 'N/D' && horarioCache > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
-            atualizarStatusBadge(celula, horarioCache, progFim);
-            return;
-        }
-        
-        if (celula.getAttribute('data-calcular') === 'true') {
-            celula.setAttribute('data-calculando', 'true');
-            celula.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
-            try {
-                const response = await fetch(`/previsao/${celula.getAttribute('data-placa')}?idLinha=${celula.getAttribute('data-id-linha')}`);
-                const data = await response.json();
-                if (data.duracaoSegundos) {
-                    const chegada = new Date(new Date().getTime() + data.duracaoSegundos * 1000);
-                    const est = String(chegada.getHours()).padStart(2,'0') + ":" + String(chegada.getMinutes()).padStart(2,'0');
-                    celula.innerText = est;
-                    celula.className = (progFim !== 'N/D' && est > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
-                    atualizarStatusBadge(celula, est, progFim);
-                } else celula.innerText = 'N/D';
-            } catch (error) { celula.innerText = 'Erro'; } 
-            finally { celula.removeAttribute('data-calculando'); }
+    if (routingControl && mapaInstancia) { mapaInstancia.removeControl(routingControl); routingControl = null; }
+
+    routingControl = L.Routing.control({
+        waypoints: pointsFuture,
+        lineOptions: { styles: [{color: '#0d6efd', opacity: 0.4, weight: 6}], extendToWaypoints: false, missingRouteTolerance: 100 },
+        createMarker: function(i, wp, n) {
+            if (i === 0) return L.marker(wp.latLng, {icon: icons.bus, zIndexOffset:1000}).bindPopup('<b>🚌 Veículo em Movimento</b>');
+            if (i === n - 1) return L.marker(wp.latLng, {icon: (tipo==='inicial'?icons.red:icons.green), zIndexOffset:900}).bindPopup(tipo==='inicial'?'<b>🚩 Ponto Inicial (Destino)</b>':'<b>🏁 Destino Final</b>');
+            return null; 
+        },
+        addWaypoints: false, draggableWaypoints: false, show: false, fitSelectedRoutes: false
+    });
+    
+    routingControl.on('routesfound', function(e) {
+        if(tokenSolicitante !== renderToken) return;
+        const routes = e.routes;
+        if(routes && routes.length > 0) {
+            const instructions = routes[0].instructions;
+            if(instructions && instructions.length > 0) {
+                const roadOrigin = instructions[0].road;
+                const roadDest = [...instructions].reverse().find(i => i.road && i.road.trim() !== '')?.road;
+                if(roadOrigin) {
+                    const elOrigem = document.getElementById('txt-origem');
+                    if(elOrigem && !elOrigem.innerText.match(/[a-zA-Z]/)) elOrigem.innerText = roadOrigin;
+                }
+                if(roadDest) {
+                    const elDest = document.getElementById('txt-destino');
+                    if(elDest) elDest.innerText = roadDest;
+                }
+            }
         }
     });
+    routingControl.addTo(mapaInstancia);
+
+    if (todosPontos?.length) {
+        todosPontos.forEach((p, i) => {
+            let mk;
+            if (i === 0) mk = L.marker([p.lat, p.lng], {icon: icons.red}).bindPopup(`<b>🚩 Ponto Inicial</b><br>${p.nome}`);
+            else if (tipo === 'final' && i === todosPontos.length-1) mk = L.marker([p.lat, p.lng], {icon: icons.green}).bindPopup(`<b>🏁 Destino Final</b><br>${p.nome}`);
+            else if (tipo === 'final') mk = L.marker([p.lat, p.lng], {icon: p.passou?icons.stopBlack:icons.stopBlue}).bindPopup(`<b>🚏 ${p.nome}</b><br><span class="badge ${p.passou?'bg-dark':'bg-primary'}">${p.passou?'Já passou':'Próxima parada'}</span>`);
+            if(mk) mk.addTo(mapaLayerGroup);
+        });
+    }
+
+    setTimeout(() => { if (mapaInstancia && boundsTotal.isValid()) mapaInstancia.fitBounds(boundsTotal, {padding:[50,50], maxZoom:15}); }, 500);
 }
 
 function ordenarTabela(n) {
@@ -691,14 +794,19 @@ function ordenarTabela(n) {
     const asc = !direcaoAtual[n];
     direcaoAtual[n] = asc;
     linhas.sort((a, b) => {
-        const cellA = a.cells[n]?.innerText.trim().toLowerCase() || '';
-        const cellB = b.cells[n]?.innerText.trim().toLowerCase() || '';
+        const cellA = a.children[colunaIndex(n)]?.innerText.trim().toLowerCase() || '';
+        const cellB = b.children[colunaIndex(n)]?.innerText.trim().toLowerCase() || '';
         const numA = parseFloat(cellA.replace(',', '.'));
         const numB = parseFloat(cellB.replace(',', '.'));
         if (!isNaN(numA) && !isNaN(numB)) return asc ? numA - numB : numB - numA;
         return asc ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
     });
     linhas.forEach(linha => tbody.appendChild(linha));
+}
+
+function colunaIndex(chave) {
+    const map = {'e':0, 'r':1, 'v':2, 'pi':4, 'ri':5, 'pf':6, 'u':8, 'st':9};
+    return map[chave] !== undefined ? map[chave] : 0;
 }
 
 function verificarAlertas() {
@@ -708,7 +816,7 @@ function verificarAlertas() {
             const empresa = linha.cells[0].innerText.trim(); 
             const rota = linha.cells[1].innerText.trim();
             const veiculo = linha.cells[2].innerText.trim();
-            const horario = linha.cells[3].innerText.trim();
+            const horario = linha.cells[4].innerText.trim();
             if (!clientesCriticos[empresa]) clientesCriticos[empresa] = [];
             clientesCriticos[empresa].push({ veiculo, rota, horario });
         }
@@ -722,75 +830,6 @@ function verificarAlertas() {
         document.getElementById('alertModalBody').innerHTML = html;
         new bootstrap.Modal(document.getElementById('alertModal')).show();
     }
-}
-
-function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPontos=[], rastroOficial=[], rastroReal=[], tipo, tokenSolicitante) {
-    if (tokenSolicitante !== renderToken) return;
-    limparMapaSeguro();
-    latO = parseFloat(latO)|| -23.5505; lngO = parseFloat(lngO)|| -46.6333;
-    latD = parseFloat(latD)|| latO; lngD = parseFloat(lngD)|| lngO;
-
-    try { mapaInstancia = L.map('mapaRota').setView([latO, lngO], 13); } catch (e) { return; }
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(mapaInstancia);
-
-    const iconBase = {iconSize:[25,41],iconAnchor:[12,41],popupAnchor:[1,-34],shadowSize:[41,41]};
-    const icons = {
-        bus: L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/3448/3448339.png',iconSize:[38,38],iconAnchor:[19,38],popupAnchor:[0,-35]}),
-        red: L.icon({...iconBase, iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png'}),
-        green: L.icon({...iconBase, iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png'}),
-        stopBlack: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-black.png',iconSize:[18,29],iconAnchor:[9,29],popupAnchor:[1,-25]}),
-        stopBlue: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',iconSize:[18,29],iconAnchor:[9,29],popupAnchor:[1,-25]})
-    };
-
-    let boundsTotal = L.latLngBounds();
-    boundsTotal.extend([latO, lngO]);
-
-    if (rastroOficial?.length) L.polyline(rastroOficial.map(c=>[c[1],c[0]]), {color:'#ff0505',weight:6,opacity:0.6}).addTo(mapaInstancia);
-    
-    let pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
-    if (pontosReais.length > 0) {
-        let line = L.polyline([...pontosReais.map(c=>[c[1],c[0]]), [latO,lngO]], {color:'#000',weight:5,opacity:0.6,dashArray:'1,6'}).addTo(mapaInstancia);
-        boundsTotal.extend(line.getBounds());
-    }
-
-    let pointsFuture = [L.latLng(latO, lngO)];
-    if (tipo === 'final' && waypoints?.length) waypoints.slice(1,-1).forEach(w => pointsFuture.push(L.latLng(w[1], w[0])));
-    pointsFuture.push(L.latLng(latD, lngD));
-
-    if (tokenSolicitante !== renderToken) return;
-
-    routingControlFuture = L.Routing.control({
-        waypoints: pointsFuture,
-        lineOptions: { styles: [{color: '#0d6efd', opacity: 0.4, weight: 6}] },
-        createMarker: function(i, wp, n) {
-            if (i === 0) return L.marker(wp.latLng, {icon: icons.bus, zIndexOffset:1000}).bindPopup('<b>🚌 Veículo em Movimento</b>');
-            if (i === n - 1) return L.marker(wp.latLng, {icon: (tipo==='inicial'?icons.red:icons.green), zIndexOffset:900}).bindPopup(tipo==='inicial'?'<b>🚩 Ponto Inicial (Destino)</b>':'<b>🏁 Destino Final</b>');
-            return null; 
-        },
-        addWaypoints: false, draggableWaypoints: false, show: false, fitSelectedRoutes: false
-    }).addTo(mapaInstancia);
-
-    if (todosPontos?.length) {
-        todosPontos.forEach((p, i) => {
-            if (i === 0) L.marker([p.lat, p.lng], {icon: icons.red}).addTo(mapaInstancia).bindPopup(`<b>🚩 Ponto Inicial</b><br>${p.nome}`);
-            else if (tipo === 'final' && i === todosPontos.length-1) L.marker([p.lat, p.lng], {icon: icons.green}).addTo(mapaInstancia).bindPopup(`<b>🏁 Destino Final</b><br>${p.nome}`);
-            else if (tipo === 'final') L.marker([p.lat, p.lng], {icon: p.passou?icons.stopBlack:icons.stopBlue}).addTo(mapaInstancia).bindPopup(`<b>🚏 ${p.nome}</b><br><span class="badge ${p.passou?'bg-dark':'bg-primary'}">${p.passou?'Já passou':'Próxima parada'}</span>`);
-        });
-    }
-
-    routingControlFuture.on('routesfound', function(e) {
-        if (tokenSolicitante !== renderToken) return;
-        const r = e.routes[0];
-        if (r.instructions?.length) {
-            const origem = r.instructions[0].road;
-            const dest = [...r.instructions].reverse().find(i=>i.road?.trim())?.road;
-            if(origem && document.getElementById('txt-origem')) document.getElementById('txt-origem').innerHTML = `<b>${origem}</b> <br><small class='text-muted'>Ref: ${document.getElementById('txt-origem').innerText}</small>`;
-            if(dest && document.getElementById('txt-destino')) document.getElementById('txt-destino').innerHTML = `<b>${dest}</b> <br><small class='text-muted'>Ref: ${document.getElementById('txt-destino').innerText}</small>`;
-        }
-        boundsTotal.extend(L.polyline(r.coordinates).getBounds());
-        mapaInstancia.fitBounds(boundsTotal, {padding:[50,50], maxZoom:16, animate:true});
-    });
-    setTimeout(() => { if (mapaInstancia && boundsTotal.isValid()) mapaInstancia.fitBounds(boundsTotal, {padding:[50,50], maxZoom:15}); }, 500);
 }
 
 function buscarRastreamento(p,l,h,i,b) { processarBusca(p,l,h,i,b,'final'); }
