@@ -325,6 +325,7 @@ if ('serviceWorker' in navigator) {
 
 <script>
 // --- VARIÁVEIS GLOBAIS ---
+// --- CACHE DE PREVISÕES CLIENT-SIDE ---
 let mapaInstancia = null;
 let mapaLayerGroup = null; 
 let routingControl = null; 
@@ -335,6 +336,11 @@ let direcaoAtual = {};
 let todosDadosVeiculos = window.dadosIniciais || [];
 let horaServidorAtual = window.horaServidorInicial || "00:00";
 let fuseInstance = null;
+// --- CACHE DE PREVISÕES CLIENT-SIDE ---
+const previsoesCacheLocal = new Map(); 
+
+// 4 minutos = 4 * 60 * 1000 = 240000 ms
+const TTL_PREVISAO = 240000;
 
 // OTIMIZAÇÃO 3: MEMOIZATION MAP (Cache de strings HTML)
 const htmlCache = new Map();
@@ -590,41 +596,105 @@ function atualizarCardsResumo() {
 async function carregarPrevisoesAutomaticamente(elementosPrioritarios = null) {
     const celulas = elementosPrioritarios || document.querySelectorAll('.celula-previsao');
     let index = 0;
-    const batchSize = 5;
+    const batchSize = 10; // Aumentei o batch pois a leitura de cache é rápida
+
     const processNextBatch = async () => {
-        if(index >= celulas.length) return;
+        if (index >= celulas.length) return;
+        
         const lote = Array.from(celulas).slice(index, index + batchSize);
         index += batchSize;
+
         await Promise.all(lote.map(async (celula) => {
+            const placa = celula.getAttribute('data-placa');
+            const idLinha = celula.getAttribute('data-id-linha');
             const progFim = celula.getAttribute('data-prog-fim');
-            const tsCache = celula.getAttribute('data-ts-cache');
-            if (celula.getAttribute('data-calculando') === 'true' || (celula.innerText.trim() !== '--:--' && celula.innerText.trim() !== 'N/D')) return;
-            if (tsCache && tsCache !== '0') { 
-                const dateCache = new Date(parseInt(tsCache) * 1000);
-                const horarioCache = String(dateCache.getHours()).padStart(2,'0') + ":" + String(dateCache.getMinutes()).padStart(2,'0');
-                celula.innerText = horarioCache;
-                celula.className = (progFim !== 'N/D' && horarioCache > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
+            const tsCacheServer = celula.getAttribute('data-ts-cache');
+            
+            // 1. Verifica se já está carregando ou se já tem valor final do servidor
+            if (celula.getAttribute('data-calculando') === 'true') return;
+            
+            // Se o texto não é o default e não é N/D, assumimos que já está preenchido
+            // MAS, se acabou de renderizar (refresh), o texto voltou a ser o do servidor.
+            // Então confiamos na validação do Cache Local abaixo.
+
+            // 2. Prioridade: Cache do Servidor (se existir e for válido)
+            if (tsCacheServer && tsCacheServer !== '0' && tsCacheServer !== '') {
+                // A lógica original já trata isso na renderização, mas reforçamos aqui se necessário
+                // Se já veio do servidor, não fazemos nada.
                 return;
             }
+
+            // 3. Verificação do Cache Local (JavaScript Map)
+            if (previsoesCacheLocal.has(placa)) {
+                const cacheData = previsoesCacheLocal.get(placa);
+                const idadeCache = Date.now() - cacheData.timestamp;
+
+                // Se o cache é recente (menos de 60s), usamos ele e evitamos o fetch
+                if (idadeCache < TTL_PREVISAO) {
+                    aplicarEstiloPrevisao(celula, cacheData.horario, progFim);
+                    return;
+                } else {
+                    // Cache expirado, removemos
+                    previsoesCacheLocal.delete(placa);
+                }
+            }
+
+            // 4. Se precisa calcular (flag do HTML) e não temos cache local
             if (celula.getAttribute('data-calcular') === 'true') {
                 celula.setAttribute('data-calculando', 'true');
                 celula.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary mini-loader"></div>';
+
                 try {
-                    const response = await fetch(`/previsao/${celula.getAttribute('data-placa')}?idLinha=${celula.getAttribute('data-id-linha')}`);
+                    const response = await fetch(`/previsao/${placa}?idLinha=${idLinha}`);
                     const data = await response.json();
+                    
+                    let est = 'N/D';
                     if (data.duracaoSegundos) {
                         const chegada = new Date(new Date().getTime() + data.duracaoSegundos * 1000);
-                        const est = String(chegada.getHours()).padStart(2,'0') + ":" + String(chegada.getMinutes()).padStart(2,'0');
-                        celula.innerText = est;
-                        celula.className = (progFim !== 'N/D' && est > progFim) ? 'fw-bold text-danger celula-previsao' : 'fw-bold text-success celula-previsao';
-                    } else celula.innerText = 'N/D';
-                } catch (error) { celula.innerText = 'Erro'; } 
-                finally { celula.removeAttribute('data-calculando'); }
+                        est = String(chegada.getHours()).padStart(2, '0') + ":" + String(chegada.getMinutes()).padStart(2, '0');
+                        
+                        // SALVA NO CACHE LOCAL GLOBAL
+                        previsoesCacheLocal.set(placa, {
+                            horario: est,
+                            timestamp: Date.now()
+                        });
+                    }
+
+                    aplicarEstiloPrevisao(celula, est, progFim);
+
+                } catch (error) {
+                    celula.innerText = 'Erro';
+                } finally {
+                    celula.removeAttribute('data-calculando');
+                }
             }
         }));
-        setTimeout(processNextBatch, 200); 
+
+        // Processa o próximo lote quase imediatamente se foi cache hit, ou espera um pouco se foi network
+        setTimeout(processNextBatch, 50); 
     };
+
     processNextBatch();
+}
+
+// Função auxiliar para aplicar estilo visual (DRY - Don't Repeat Yourself)
+function aplicarEstiloPrevisao(celula, horarioEstimado, horarioProgramado) {
+    celula.innerText = horarioEstimado;
+    
+    // Remove classes anteriores para garantir limpeza
+    celula.classList.remove('text-danger', 'text-success', 'text-dark');
+    celula.classList.add('fw-bold', 'celula-previsao');
+
+    if (horarioEstimado === 'N/D' || horarioEstimado === '--:--') {
+        celula.classList.add('text-muted');
+        return;
+    }
+
+    if (horarioProgramado !== 'N/D' && horarioEstimado > horarioProgramado) {
+        celula.classList.add('text-danger'); // Atrasado
+    } else {
+        celula.classList.add('text-success'); // No horário/Adiantado
+    }
 }
 
 async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, button, tipo) {
