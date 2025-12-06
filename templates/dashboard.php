@@ -649,15 +649,16 @@ async function carregarPrevisoesAutomaticamente(elementosPrioritarios = null) {
                     const data = await response.json();
                     
                     let est = 'N/D';
-                    if (data.duracaoSegundos) {
-                        const chegada = new Date(new Date().getTime() + data.duracaoSegundos * 1000);
-                        est = String(chegada.getHours()).padStart(2, '0') + ":" + String(chegada.getMinutes()).padStart(2, '0');
-                        
-                        // SALVA NO CACHE LOCAL GLOBAL
-                        previsoesCacheLocal.set(placa, {
-                            horario: est,
-                            timestamp: Date.now()
-                        });
+                   if (data.duracaoSegundos) {
+    const chegada = new Date(new Date().getTime() + data.duracaoSegundos * 1000);
+    est = String(chegada.getHours()).padStart(2, '0') + ":" + String(chegada.getMinutes()).padStart(2, '0');
+    
+    // --- ALTERAÇÃO AQUI: Salvamos o JSON completo (rota + tempo) ---
+    previsoesCacheLocal.set(placa, {
+        horario: est,
+        fullData: data, // Guardamos tudo: waypoints, rastro, etc.
+        timestamp: Date.now()
+    });
                     }
 
                     aplicarEstiloPrevisao(celula, est, progFim);
@@ -708,39 +709,62 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
     const textoOriginal = previsaoCell.innerHTML;
     
     document.getElementById("mapaRota").style.visibility = 'visible';
-    mapaLayerGroup.clearLayers(); 
+    if(mapaLayerGroup) mapaLayerGroup.clearLayers(); 
     
     if (routingControl && mapaInstancia) { 
         mapaInstancia.removeControl(routingControl); 
         routingControl = null; 
     }
     
+    // Skeleton Screen (Carregando...)
     document.getElementById("resultadoConteudo").innerHTML = `
         <div class="container-fluid px-3 pt-3">
-            <div class="skeleton skeleton-text" style="height: 30px; width: 50%"></div>
+            <div class="d-flex justify-content-between mb-3"><div class="skeleton skeleton-text" style="width: 40%"></div><div class="skeleton skeleton-text" style="width: 20%"></div></div>
             <div class="row g-2 mb-3">
                 <div class="col-6"><div class="skeleton skeleton-block"></div></div>
                 <div class="col-6"><div class="skeleton skeleton-block"></div></div>
             </div>
-            <div class="text-center text-muted small">Buscando rastreamento...</div>
+            <div class="text-center text-muted small"><i class="bi bi-hdd-network"></i> Carregando dados do mapa...</div>
         </div>
     `;
     new bootstrap.Modal(document.getElementById("popupResultado")).show();
 
     try {
         const baseUrl = tipo === 'inicial' ? `/previsaoinicial/${placa}` : `/previsao/${placa}`;
-        const [respRastreio, respRota] = await Promise.all([
-            fetch(`/buscar_rastreamento/${placa}`, { signal }), 
-            fetch(`${baseUrl}?idLinha=${idLinha}`, { signal }) 
+        
+        // --- LÓGICA DE CACHE INTELIGENTE PARA O MAPA ---
+        let promessaRota;
+        let usouCache = false;
+
+        // Verifica se temos cache VÁLIDO (menos de 4 min) e se o tipo é compátivel (cache da tabela geralmente é 'final')
+        if (tipo !== 'inicial' && previsoesCacheLocal.has(placa)) {
+            const cacheItem = previsoesCacheLocal.get(placa);
+            if ((Date.now() - cacheItem.timestamp) < TTL_PREVISAO) {
+                // USA O CACHE: Retorna uma promessa resolvida imediatamente com os dados locais
+                console.log("Usando cache de rota para o mapa!");
+                promessaRota = Promise.resolve(cacheItem.fullData);
+                usouCache = true;
+            }
+        }
+
+        // Se não usou cache, faz o fetch normal
+        if (!promessaRota) {
+            promessaRota = fetch(`${baseUrl}?idLinha=${idLinha}`, { signal }).then(r => r.json());
+        }
+
+        // Buscamos sempre a POSIÇÃO atual do veículo (é leve e precisa ser precisa)
+        // E buscamos a rota (seja do cache ou da internet)
+        const [respRastreio, rotaData] = await Promise.all([
+            fetch(`/buscar_rastreamento/${placa}`, { signal }).then(r => r.json()), 
+            promessaRota
         ]);
         
         if (renderToken !== meuToken) return;
-        const data = await respRastreio.json();
-        const rotaData = await respRota.json();
+
         previsaoCell.innerHTML = textoOriginal;
 
         let latVeiculo = null, lngVeiculo = null;
-        let veiculoData = (Array.isArray(data) && data.length > 0) ? data[0] : null;
+        let veiculoData = (Array.isArray(respRastreio) && respRastreio.length > 0) ? respRastreio[0] : null;
         
         if (veiculoData) {
             if (veiculoData.lat) { latVeiculo = veiculoData.lat; lngVeiculo = veiculoData.lng; }
@@ -748,20 +772,31 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
                 const p = (typeof veiculoData.loc === 'string') ? veiculoData.loc.split(',') : veiculoData.loc;
                 latVeiculo = p[0]; lngVeiculo = p[1];
             }
+            
             const enderecoAtual = veiculoData.endereco || veiculoData.loc || 'Localizando...';
             let horarioEstimado = '--';
+            
+            // Recalcula hora estimada baseada no "duracaoSegundos" (do cache ou live)
+            // Nota: Se for do cache, o tempo estimado será "da hora que o cache foi criado".
+            // Se quiser atualizar o tempo baseado no cache antigo, precisaria recalcular, 
+            // mas geralmente para 4 minutos a diferença é aceitável.
             if (rotaData.duracaoSegundos) {
+                 // Se quiser ser muito preciso e o dado for de cache, poderia subtrair o tempo passado, 
+                 // mas manter simples é melhor para evitar bugs de tempo negativo.
                  const chegada = new Date(new Date().getTime() + rotaData.duracaoSegundos * 1000);
                  horarioEstimado = String(chegada.getHours()).padStart(2, '0') + ":" + String(chegada.getMinutes()).padStart(2, '0');
             }
+
             const labelProg = (tipo === 'inicial') ? 'Inicial Programado' : 'Final Programado';
             const labelEst = (tipo === 'inicial') ? 'Chegada Prevista' : 'Previsão Atualizada';
             const statusCor = (horarioEstimado !== '--' && horarioFinalProg !== 'N/D' && horarioEstimado > horarioFinalProg) ? 'text-danger fw-bold' : (horarioEstimado !== '--' ? 'text-success fw-bold' : 'text-dark');
             
+            const badgeCache = usouCache ? '<span class="badge bg-light text-secondary border ms-2" title="Rota carregada da memória">⚡ Rápido</span>' : '';
+
             document.getElementById("resultadoConteudo").innerHTML = `
             <div class="container-fluid px-3 pt-3">
                 <div class="d-flex justify-content-between align-items-center mb-3 p-2 border rounded bg-light">
-                    <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'}</h5>
+                    <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-bus-front me-2 text-primary"></i>${veiculoData.identificacao || 'Veículo'} ${badgeCache}</h5>
                     <span class="badge bg-success">Online</span>
                 </div>
                 <div class="row g-2 mb-3">
