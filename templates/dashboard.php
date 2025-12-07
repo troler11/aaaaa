@@ -828,77 +828,123 @@ async function processarBusca(placa, localAlvo, horarioFinalProg, idLinha, butto
 
 function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPontos=[], rastroOficial=[], rastroReal=[], tipo, tokenSolicitante) {
     if (tokenSolicitante !== renderToken || !mapaInstancia) return;
-    latO = parseFloat(latO)|| -23.5505; lngO = parseFloat(lngO)|| -46.6333;
-    latD = parseFloat(latD)|| latO; lngD = parseFloat(lngD)|| lngO;
 
+    // 1. LIMPEZA
+    mapaLayerGroup.clearLayers();
+    if (routingControl) {
+        mapaInstancia.removeControl(routingControl);
+        routingControl = null;
+    }
+
+    latO = parseFloat(latO); lngO = parseFloat(lngO);
+    
     const icons = {
-        bus: L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/3448/3448339.png',iconSize:[38,38],iconAnchor:[19,38],popupAnchor:[0,-35]}),
-        red: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', iconSize:[25,41],iconAnchor:[12,41],popupAnchor:[1,-34]}),
-        green: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png', iconSize:[25,41],iconAnchor:[12,41],popupAnchor:[1,-34]}),
-        stopBlack: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-black.png',iconSize:[18,29],iconAnchor:[9,29],popupAnchor:[1,-25]}),
-        stopBlue: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',iconSize:[18,29],iconAnchor:[9,29],popupAnchor:[1,-25]})
+        bus: L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/3448/3448339.png', iconSize:[38,38], iconAnchor:[19,38], popupAnchor:[0,-30]}),
+        flagStart: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png', iconSize:[25,41], iconAnchor:[12,41], popupAnchor:[1,-34]}),
+        flagEnd: L.icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png', iconSize:[25,41], iconAnchor:[12,41], popupAnchor:[1,-34]})
     };
 
     let boundsTotal = L.latLngBounds();
-    boundsTotal.extend([latO, lngO]);
+    let indexCorte = 0;
+    let rastroCoords = [];
 
-    if (rastroOficial?.length) L.polyline(rastroOficial.map(c=>[c[1],c[0]]), {color:'#ff0505',weight:6,opacity:0.6}).addTo(mapaLayerGroup);
-    
-    let pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
-    if (pontosReais.length > 0) {
-        let line = L.polyline([...pontosReais.map(c=>[c[1],c[0]]), [latO,lngO]], {color:'#000',weight:5,opacity:0.6,dashArray:'1,6'}).addTo(mapaLayerGroup);
-        boundsTotal.extend(line.getBounds());
-    }
-
-    let pointsFuture = [L.latLng(latO, lngO)];
-    if (tipo === 'final' && waypoints?.length) waypoints.slice(1,-1).forEach(w => pointsFuture.push(L.latLng(w[1], w[0])));
-    pointsFuture.push(L.latLng(latD, lngD));
-
-    if (routingControl && mapaInstancia) { mapaInstancia.removeControl(routingControl); routingControl = null; }
-
-    routingControl = L.Routing.control({
-        waypoints: pointsFuture,
-        lineOptions: { styles: [{color: '#0d6efd', opacity: 0.4, weight: 6}], extendToWaypoints: false, missingRouteTolerance: 100 },
-        createMarker: function(i, wp, n) {
-            if (i === 0) return L.marker(wp.latLng, {icon: icons.bus, zIndexOffset:1000}).bindPopup('<b>🚌 Veículo em Movimento</b>');
-            if (i === n - 1) return L.marker(wp.latLng, {icon: (tipo==='inicial'?icons.red:icons.green), zIndexOffset:900}).bindPopup(tipo==='inicial'?'<b>🚩 Ponto Inicial (Destino)</b>':'<b>🏁 Destino Final</b>');
-            return null; 
-        },
-        addWaypoints: false, draggableWaypoints: false, show: false, fitSelectedRoutes: false
-    });
-    
-    routingControl.on('routesfound', function(e) {
-        if(tokenSolicitante !== renderToken) return;
-        const routes = e.routes;
-        if(routes && routes.length > 0) {
-            const instructions = routes[0].instructions;
-            if(instructions && instructions.length > 0) {
-                const roadOrigin = instructions[0].road;
-                const roadDest = [...instructions].reverse().find(i => i.road && i.road.trim() !== '')?.road;
-                if(roadOrigin) {
-                    const elOrigem = document.getElementById('txt-origem');
-                    if(elOrigem && !elOrigem.innerText.match(/[a-zA-Z]/)) elOrigem.innerText = roadOrigin;
-                }
-                if(roadDest) {
-                    const elDest = document.getElementById('txt-destino');
-                    if(elDest) elDest.innerText = roadDest;
-                }
+    // --- PREPARAÇÃO DOS DADOS ---
+    if (rastroOficial?.length) {
+        rastroCoords = rastroOficial.map(c => [parseFloat(c[1]), parseFloat(c[0])]); // [lat, lng]
+        
+        // Descobre o ponto do traçado mais próximo do ônibus para saber onde começa o "futuro"
+        let menorDist = Infinity;
+        for (let i = 0; i < rastroCoords.length; i++) {
+            const dist = Math.sqrt(Math.pow(rastroCoords[i][0] - latO, 2) + Math.pow(rastroCoords[i][1] - lngO, 2));
+            if (dist < menorDist) {
+                menorDist = dist;
+                indexCorte = i;
             }
         }
-    });
-    routingControl.addTo(mapaInstancia);
+    }
 
+    // --- CAMADA 1: ROTA OFICIAL COMPLETA (VERMELHA) ---
+    // Isso garante que você sempre veja o traçado oficial inteiro
+    if (rastroCoords.length > 0) {
+        const linhaVermelha = L.polyline(rastroCoords, {
+            color: '#ff0505',  // Vermelho
+            weight: 6,         // Espessura grossa para ser a base
+            opacity: 0.4,      // Transparente para não ofuscar o resto
+            interactive: false
+        }).addTo(mapaLayerGroup);
+        boundsTotal.extend(linhaVermelha.getBounds());
+
+        // --- CAMADA 2: ROTA FUTURA (AZUL) ---
+        // Desenha "por cima" da vermelha, apenas do ponto atual para frente
+        const parteFutura = rastroCoords.slice(indexCorte);
+        if (parteFutura.length > 1) {
+            L.polyline(parteFutura, {
+                color: '#0d6efd', // Azul forte
+                weight: 4,        // Um pouco mais fina que a vermelha para dar efeito de "dentro"
+                opacity: 0.9,
+                interactive: false
+            }).addTo(mapaLayerGroup);
+        }
+
+        // --- CAMADA 3: LINHA GUIA DE DESVIO ---
+        // Se o ônibus estiver fora da rota, desenha uma linha pontilhada ligando ele à rota
+        L.polyline([[latO, lngO], rastroCoords[indexCorte]], {
+            color: '#0d6efd',
+            weight: 2,
+            dashArray: '5, 5',
+            opacity: 0.8
+        }).addTo(mapaLayerGroup);
+    }
+
+    // --- CAMADA 4: RASTRO REAL (PRETO PONTILHADO) ---
+    // Histórico do GPS
+    const pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
+    if (pontosReais.length > 0) {
+        const pathReal = [...pontosReais.map(c => [c[1], c[0]]), [latO, lngO]];
+        const linhaReal = L.polyline(pathReal, {
+            color: '#000', 
+            weight: 3, 
+            opacity: 0.7, 
+            dashArray: '3, 6', // Pontilhado preto
+            interactive: false
+        }).addTo(mapaLayerGroup);
+        boundsTotal.extend(linhaReal.getBounds());
+    }
+
+    // --- CAMADA 5: MARCADORES ---
     if (todosPontos?.length) {
         todosPontos.forEach((p, i) => {
-            let mk;
-            if (i === 0) mk = L.marker([p.lat, p.lng], {icon: icons.red}).bindPopup(`<b>🚩 Ponto Inicial</b><br>${p.nome}`);
-            else if (tipo === 'final' && i === todosPontos.length-1) mk = L.marker([p.lat, p.lng], {icon: icons.green}).bindPopup(`<b>🏁 Destino Final</b><br>${p.nome}`);
-            else if (tipo === 'final') mk = L.marker([p.lat, p.lng], {icon: p.passou?icons.stopBlack:icons.stopBlue}).bindPopup(`<b>🚏 ${p.nome}</b><br><span class="badge ${p.passou?'bg-dark':'bg-primary'}">${p.passou?'Já passou':'Próxima parada'}</span>`);
-            if(mk) mk.addTo(mapaLayerGroup);
+            const isFirst = i === 0;
+            const isLast = i === todosPontos.length - 1;
+            
+            if (isFirst || (tipo === 'final' && isLast)) {
+                L.marker([p.lat, p.lng], { icon: isFirst ? icons.flagStart : icons.flagEnd }).addTo(mapaLayerGroup);
+            } else if (tipo === 'final') {
+                // Se o índice da parada for menor que o corte, ela fica cinza (passou)
+                // Se for maior, fica azul (futuro) - Aproximação visual
+                // Nota: Idealmente usaríamos a flag p.passou do backend se disponível
+                const passouVisualmente = (rastroCoords.length > 0) ? false : p.passou; // Se temos rastro, cor é fixa, se não, usa flag
+                
+                L.circleMarker([p.lat, p.lng], { 
+                    radius: 4, 
+                    fillColor: p.passou ? '#555' : '#0d6efd', 
+                    color: 'transparent', 
+                    fillOpacity: 0.9 
+                }).bindPopup(`<b>${p.nome}</b>`).addTo(mapaLayerGroup);
+            }
         });
     }
 
-    setTimeout(() => { if (mapaInstancia && boundsTotal.isValid()) mapaInstancia.fitBounds(boundsTotal, {padding:[50,50], maxZoom:15}); }, 500);
+    // --- CAMADA 6: ÔNIBUS ---
+    L.marker([latO, lngO], { icon: icons.bus, zIndexOffset: 1000 })
+        .bindPopup(`<b>🚌 ${nomeO}</b>`)
+        .addTo(mapaLayerGroup);
+    
+    boundsTotal.extend([latO, lngO]);
+
+    if (mapaInstancia && boundsTotal.isValid()) {
+        mapaInstancia.fitBounds(boundsTotal, { padding: [50, 50], maxZoom: 16, animate: false });
+    }
 }
 
 function ordenarTabela(n) {
