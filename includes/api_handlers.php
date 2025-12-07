@@ -289,14 +289,53 @@ function calcular_rota_tomtom($locations_string) {
     throw new Exception("Falha TomTom (Todas as chaves falharam)");
 }
 
+// --- NOVA FUNÇÃO: Conecta ao Render ---
+function call_render_worker($placa) {
+    // Limpa a placa para evitar injeção ou erro na URL
+    $placa_clean = preg_replace("/[^A-Z0-9]/", '', strtoupper($placa));
+    
+    // Monta a URL: https://seu-render.com?placa=ABC1234
+    $url = URL_WORKER_RENDER . "?placa=" . $placa_clean;
+    
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 25, // Tempo seguro para o Render "acordar" e fazer login se precisar
+        CURLOPT_HTTPHEADER => [
+            // O Header de segurança que configuramos
+            "X-Render-Token: " . RENDER_TOKEN 
+        ]
+    ]);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+
+    return ['body' => $response, 'code' => $httpCode, 'error' => $curlError];
+}
+
+// --- SUBSTIUIÇÃO 1: Função usada internamente pelos cálculos de rota ---
 function get_veiculo_posicao($placa_clean) {
-    global $URL_API_RASTREAMENTO; 
-    garantir_aquecimento(); 
-    $payload = ["placa_ou_identificacao" => $placa_clean, "index_view_ft" => "7259"];
-    list($body, $code, $err) = fazer_requisicao_resiliente('POST', $URL_API_RASTREAMENTO, $payload, []);
-    if ($err || $code >= 400) throw new Exception("Erro API Rastreamento: $code");
-    $dados = json_decode($body, true);
-    if (empty($dados[0])) throw new Exception("Veículo não localizado.");
+    // Chama o Render ao invés de tentar logar na ABM localmente
+    $resp = call_render_worker($placa_clean);
+    
+    if ($resp['error'] || $resp['code'] >= 400) {
+        // Se o Render retornar erro (ex: 401 ou 500), lançamos exceção
+        $msg = $resp['error'] ?: "Erro HTTP " . $resp['code'];
+        // Tenta ler a mensagem de erro do JSON do Render, se houver
+        $jsonErr = json_decode($resp['body'], true);
+        if (isset($jsonErr['erro'])) $msg = $jsonErr['erro'];
+        
+        throw new Exception("Erro ao localizar veículo (Render): " . $msg);
+    }
+    
+    $dados = json_decode($resp['body'], true);
+    
+    if (empty($dados) || empty($dados[0])) {
+        throw new Exception("Veículo não localizado.");
+    }
+    
     return $dados[0];
 }
 
@@ -304,19 +343,21 @@ function get_veiculo_posicao($placa_clean) {
 // HANDLERS
 // ==============================================================================
 
+// --- SUBSTITUIÇÃO 2: Handler da API AJAX (usado pelo botão do mapa) ---
 function handle_buscar_rastreamento($placa) {
-    verificar_auth_e_liberar();
-    global $URL_API_RASTREAMENTO;
-    $placa_clean = limpar_placa($placa);
-    garantir_aquecimento();
-    $payload = ["placa_ou_identificacao" => $placa_clean, "index_view_ft" => "7259"];
-    list($body, $code, $erro) = fazer_requisicao_resiliente('POST', $URL_API_RASTREAMENTO, $payload, []);
+    verificar_auth_e_liberar(); // Mantém a segurança do usuário logado no Oracle
     
-    if ($erro) responder_json(["erro" => $erro], 500);
+    // Delega para o Render
+    $resp = call_render_worker($placa);
     
-    http_response_code($code);
+    if ($resp['error']) {
+        responder_json(["erro" => "Falha na comunicação interna."], 500);
+    }
+    
+    // Repassa exatamente o que o Render respondeu (Status e JSON)
+    http_response_code($resp['code']);
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(json_decode($body), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    echo $resp['body'];
     exit;
 }
 
