@@ -29,9 +29,9 @@ try {
 
 // --- 2. CONFIGURAÇÃO DE URLS (ABM Tecnologia) ---
 $URL_BASE      = "https://abmtecnologia.abmprotege.net";
-$URL_LOGIN     = $URL_BASE . "/emp/abmtecnologia";
-$URL_MAPA      = $URL_BASE . "/mapaGeral"; // <--- NOVO: Essencial para aquecer a sessão
-$URL_API_RASTREAMENTO = $URL_BASE . "/mapaGeral/filtrarRastreadosPorPlacaOuIdentificacao";
+define('URL_WORKER_RENDER', 'https://testeservidor-wg1g.onrender.com');
+define('RENDER_TOKEN', 'teste');
+
 
 // --- 3. CONFIGURAÇÃO DASHBOARD EXTRA (Mantido do seu original) ---
 $URL_DASHBOARD_MAIN = "https://abmbus.com.br:8181/api/dashboard/mongo/95?naoVerificadas=false&agrupamentos=";
@@ -41,8 +41,7 @@ $HEADERS_DASHBOARD_MAIN = [
 ];
 
 // --- 4. CREDENCIAIS & SESSÃO ---
-$ABM_USER = "lucas";
-$ABM_PASS = "Lukinha2009";
+
 
 // Onde salvar o cookie (Usa pasta temporária do sistema para evitar problemas de permissão)
 $COOKIE_FILE = sys_get_temp_dir() . '/abm_session_cookie.txt';
@@ -82,3 +81,4 @@ function verificarPermissaoPagina($menu_necessario) {
         exit; // IMPORTANTE: o exit para o script aqui
     }
 }
+
