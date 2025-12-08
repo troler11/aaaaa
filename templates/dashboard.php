@@ -836,7 +836,9 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         routingControl = null;
     }
 
+    // Garante que são números para os cálculos de distância
     latO = parseFloat(latO); lngO = parseFloat(lngO);
+    latD = parseFloat(latD); lngD = parseFloat(lngD);
     
     const icons = {
         bus: L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/3448/3448339.png', iconSize:[38,38], iconAnchor:[19,38], popupAnchor:[0,-30]}),
@@ -845,23 +847,126 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
     };
 
     let boundsTotal = L.latLngBounds();
-    let indexCorte = 0;
+    let indexCorteInicio = 0;
+    let indexCorteFim = 0; // Novo índice para o final da linha azul
     let rastroCoords = [];
 
-    // --- PREPARAÇÃO DOS DADOS ---
+    // --- PREPARAÇÃO DOS DADOS E CÁLCULOS DOS CORTES ---
     if (rastroOficial?.length) {
         rastroCoords = rastroOficial.map(c => [parseFloat(c[1]), parseFloat(c[0])]); // [lat, lng]
-        
-        // Descobre o ponto do traçado mais próximo do ônibus para saber onde começa o "futuro"
-        let menorDist = Infinity;
+        indexCorteFim = rastroCoords.length; // Por padrão, vai até o fim do array
+
+        // 1. Descobre onde o ÔNIBUS está na linha (Início da linha azul)
+        let menorDistBus = Infinity;
         for (let i = 0; i < rastroCoords.length; i++) {
             const dist = Math.sqrt(Math.pow(rastroCoords[i][0] - latO, 2) + Math.pow(rastroCoords[i][1] - lngO, 2));
-            if (dist < menorDist) {
-                menorDist = dist;
-                indexCorte = i;
+            if (dist < menorDistBus) {
+                menorDistBus = dist;
+                indexCorteInicio = i;
             }
         }
+
+        // 2. Se for Previsão INICIAL, descobre onde é o PONTO DE CHEGADA na linha (Fim da linha azul)
+        // Isso evita que a linha azul continue depois do ponto inicial até o final da rota da linha
+        if (tipo === 'inicial') {
+            let menorDistDest = Infinity;
+            // Otimização: Procura a partir do ônibus para frente, assumindo rota linear/circular progressiva
+            // Se preferir buscar em toda rota (caso o GPS pule), mude o 'j = indexCorteInicio' para 'j = 0'
+            for (let j = 0; j < rastroCoords.length; j++) {
+                const distDest = Math.sqrt(Math.pow(rastroCoords[j][0] - latD, 2) + Math.pow(rastroCoords[j][1] - lngD, 2));
+                if (distDest < menorDistDest) {
+                    menorDistDest = distDest;
+                    indexCorteFim = j + 1; // +1 para incluir o ponto na renderização
+                }
+            }
+            
+            // Segurança: Se por algum motivo o cálculo falhar ou o destino estiver "atrás" (loop), mantém até o fim
+            // ou ajusta conforme necessidade. Aqui mantemos a lógica simples de proximidade.
+            if (indexCorteFim < indexCorteInicio) indexCorteFim = rastroCoords.length;
+        }
     }
+
+    // --- CAMADA 1: ROTA OFICIAL COMPLETA (VERMELHA) ---
+    if (rastroCoords.length > 0) {
+        const linhaVermelha = L.polyline(rastroCoords, {
+            color: '#ff0505',
+            weight: 6,
+            opacity: 0.4,
+            interactive: false
+        }).addTo(mapaLayerGroup);
+        boundsTotal.extend(linhaVermelha.getBounds());
+
+        // --- CAMADA 2: ROTA FUTURA (AZUL) ---
+        // Agora usa o 'indexCorteFim' para parar de desenhar no destino
+        const parteFutura = rastroCoords.slice(indexCorteInicio, indexCorteFim);
+        
+        if (parteFutura.length > 1) {
+            L.polyline(parteFutura, {
+                color: '#0d6efd',
+                weight: 4,
+                opacity: 0.9,
+                interactive: false
+            }).addTo(mapaLayerGroup);
+        }
+
+        // --- CAMADA 3: LINHA GUIA DE DESVIO ---
+        L.polyline([[latO, lngO], rastroCoords[indexCorteInicio]], {
+            color: '#0d6efd',
+            weight: 2,
+            dashArray: '5, 5',
+            opacity: 0.8
+        }).addTo(mapaLayerGroup);
+    }
+
+    // --- CAMADA 4: RASTRO REAL (PRETO PONTILHADO) ---
+    // Apenas se NÃO for inicial
+    const pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
+    if (tipo !== 'inicial' && pontosReais.length > 0) {
+        const pathReal = [...pontosReais.map(c => [c[1], c[0]]), [latO, lngO]];
+        const linhaReal = L.polyline(pathReal, {
+            color: '#000', 
+            weight: 3, 
+            opacity: 0.7, 
+            dashArray: '3, 6',
+            interactive: false
+        }).addTo(mapaLayerGroup);
+        boundsTotal.extend(linhaReal.getBounds());
+    }
+
+    // --- CAMADA 5: MARCADORES ---
+    if (todosPontos?.length) {
+        todosPontos.forEach((p, i) => {
+            const isFirst = i === 0;
+            const isLast = i === todosPontos.length - 1;
+            
+            // Lógica de exibição dos ícones de bandeira
+            if (isFirst || (tipo === 'final' && isLast)) {
+                L.marker([p.lat, p.lng], { icon: isFirst ? icons.flagStart : icons.flagEnd }).addTo(mapaLayerGroup);
+            } else if (tipo === 'final') {
+                const passouVisualmente = (rastroCoords.length > 0) ? false : p.passou; 
+                L.circleMarker([p.lat, p.lng], { 
+                    radius: 4, 
+                    fillColor: p.passou ? '#555' : '#0d6efd', 
+                    color: 'transparent', 
+                    fillOpacity: 0.9 
+                }).bindPopup(`<b>${p.nome}</b>`).addTo(mapaLayerGroup);
+            }
+        });
+    }
+
+    // --- CAMADA 6: ÔNIBUS ---
+    L.marker([latO, lngO], { icon: icons.bus, zIndexOffset: 1000 })
+        .bindPopup(`<b>🚌 ${nomeO}</b>`)
+        .addTo(mapaLayerGroup);
+    
+    // Garante que o zoom foca no Ônibus e no Destino (para garantir visibilidade da parte azul)
+    boundsTotal.extend([latO, lngO]);
+    if (!isNaN(latD) && !isNaN(lngD)) boundsTotal.extend([latD, lngD]);
+
+    if (mapaInstancia && boundsTotal.isValid()) {
+        mapaInstancia.fitBounds(boundsTotal, { padding: [50, 50], maxZoom: 16, animate: false });
+    }
+}
 
     // --- CAMADA 1: ROTA OFICIAL COMPLETA (VERMELHA) ---
     // Isso garante que você sempre veja o traçado oficial inteiro
@@ -1009,3 +1114,4 @@ function toggleFullScreen() {
 </script>
 </body>
 </html>
+
