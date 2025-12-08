@@ -886,6 +886,26 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         }
     }
 
+        // 2. Se for Previsão INICIAL, descobre onde é o PONTO DE CHEGADA na linha (Fim da linha azul)
+        // Isso evita que a linha azul continue depois do ponto inicial até o final da rota da linha
+        if (tipo === 'inicial') {
+            let menorDistDest = Infinity;
+            // Otimização: Procura a partir do ônibus para frente, assumindo rota linear/circular progressiva
+            // Se preferir buscar em toda rota (caso o GPS pule), mude o 'j = indexCorteInicio' para 'j = 0'
+            for (let j = 0; j < rastroCoords.length; j++) {
+                const distDest = Math.sqrt(Math.pow(rastroCoords[j][0] - latD, 2) + Math.pow(rastroCoords[j][1] - lngD, 2));
+                if (distDest < menorDistDest) {
+                    menorDistDest = distDest;
+                    indexCorteFim = j + 1; // +1 para incluir o ponto na renderização
+                }
+            }
+            
+            // Segurança: Se por algum motivo o cálculo falhar ou o destino estiver "atrás" (loop), mantém até o fim
+            // ou ajusta conforme necessidade. Aqui mantemos a lógica simples de proximidade.
+            if (indexCorteFim < indexCorteInicio) indexCorteFim = rastroCoords.length;
+        }
+    }
+
     // --- CAMADA 1: ROTA OFICIAL COMPLETA (VERMELHA) ---
     if (rastroCoords.length > 0) {
         const linhaVermelha = L.polyline(rastroCoords, {
