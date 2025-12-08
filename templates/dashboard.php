@@ -886,26 +886,6 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         }
     }
 
-        // 2. Se for Previsão INICIAL, descobre onde é o PONTO DE CHEGADA na linha (Fim da linha azul)
-        // Isso evita que a linha azul continue depois do ponto inicial até o final da rota da linha
-        if (tipo === 'inicial') {
-            let menorDistDest = Infinity;
-            // Otimização: Procura a partir do ônibus para frente, assumindo rota linear/circular progressiva
-            // Se preferir buscar em toda rota (caso o GPS pule), mude o 'j = indexCorteInicio' para 'j = 0'
-            for (let j = 0; j < rastroCoords.length; j++) {
-                const distDest = Math.sqrt(Math.pow(rastroCoords[j][0] - latD, 2) + Math.pow(rastroCoords[j][1] - lngD, 2));
-                if (distDest < menorDistDest) {
-                    menorDistDest = distDest;
-                    indexCorteFim = j + 1; // +1 para incluir o ponto na renderização
-                }
-            }
-            
-            // Segurança: Se por algum motivo o cálculo falhar ou o destino estiver "atrás" (loop), mantém até o fim
-            // ou ajusta conforme necessidade. Aqui mantemos a lógica simples de proximidade.
-            if (indexCorteFim < indexCorteInicio) indexCorteFim = rastroCoords.length;
-        }
-    }
-
     // --- CAMADA 1: ROTA OFICIAL COMPLETA (VERMELHA) ---
     if (rastroCoords.length > 0) {
         const linhaVermelha = L.polyline(rastroCoords, {
@@ -988,90 +968,6 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
     }
 }
 
-    // --- CAMADA 1: ROTA OFICIAL COMPLETA (VERMELHA) ---
-    // Isso garante que você sempre veja o traçado oficial inteiro
-    if (rastroCoords.length > 0) {
-        const linhaVermelha = L.polyline(rastroCoords, {
-            color: '#ff0505',  // Vermelho
-            weight: 6,         // Espessura grossa para ser a base
-            opacity: 0.4,      // Transparente para não ofuscar o resto
-            interactive: false
-        }).addTo(mapaLayerGroup);
-        boundsTotal.extend(linhaVermelha.getBounds());
-
-        // --- CAMADA 2: ROTA FUTURA (AZUL) ---
-        // Desenha "por cima" da vermelha, apenas do ponto atual para frente
-        const parteFutura = rastroCoords.slice(indexCorte);
-        if (parteFutura.length > 1) {
-            L.polyline(parteFutura, {
-                color: '#0d6efd', // Azul forte
-                weight: 4,        // Um pouco mais fina que a vermelha para dar efeito de "dentro"
-                opacity: 0.9,
-                interactive: false
-            }).addTo(mapaLayerGroup);
-        }
-
-        // --- CAMADA 3: LINHA GUIA DE DESVIO ---
-        // Se o ônibus estiver fora da rota, desenha uma linha pontilhada ligando ele à rota
-        L.polyline([[latO, lngO], rastroCoords[indexCorte]], {
-            color: '#0d6efd',
-            weight: 2,
-            dashArray: '5, 5',
-            opacity: 0.8
-        }).addTo(mapaLayerGroup);
-    }
-
-    // --- CAMADA 4: RASTRO REAL (PRETO PONTILHADO) ---
-    // Histórico do GPS
-    const pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
-    if (pontosReais.length > 0) {
-        const pathReal = [...pontosReais.map(c => [c[1], c[0]]), [latO, lngO]];
-        const linhaReal = L.polyline(pathReal, {
-            color: '#000', 
-            weight: 3, 
-            opacity: 0.7, 
-            dashArray: '3, 6', // Pontilhado preto
-            interactive: false
-        }).addTo(mapaLayerGroup);
-        boundsTotal.extend(linhaReal.getBounds());
-    }
-
-    // --- CAMADA 5: MARCADORES ---
-    if (todosPontos?.length) {
-        todosPontos.forEach((p, i) => {
-            const isFirst = i === 0;
-            const isLast = i === todosPontos.length - 1;
-            
-            if (isFirst || (tipo === 'final' && isLast)) {
-                L.marker([p.lat, p.lng], { icon: isFirst ? icons.flagStart : icons.flagEnd }).addTo(mapaLayerGroup);
-            } else if (tipo === 'final') {
-                // Se o índice da parada for menor que o corte, ela fica cinza (passou)
-                // Se for maior, fica azul (futuro) - Aproximação visual
-                // Nota: Idealmente usaríamos a flag p.passou do backend se disponível
-                const passouVisualmente = (rastroCoords.length > 0) ? false : p.passou; // Se temos rastro, cor é fixa, se não, usa flag
-                
-                L.circleMarker([p.lat, p.lng], { 
-                    radius: 4, 
-                    fillColor: p.passou ? '#555' : '#0d6efd', 
-                    color: 'transparent', 
-                    fillOpacity: 0.9 
-                }).bindPopup(`<b>${p.nome}</b>`).addTo(mapaLayerGroup);
-            }
-        });
-    }
-
-    // --- CAMADA 6: ÔNIBUS ---
-    L.marker([latO, lngO], { icon: icons.bus, zIndexOffset: 1000 })
-        .bindPopup(`<b>🚌 ${nomeO}</b>`)
-        .addTo(mapaLayerGroup);
-    
-    boundsTotal.extend([latO, lngO]);
-
-    if (mapaInstancia && boundsTotal.isValid()) {
-        mapaInstancia.fitBounds(boundsTotal, { padding: [50, 50], maxZoom: 16, animate: false });
-    }
-}
-
 function ordenarTabela(n) {
     const tbody = document.getElementById("tabela-veiculos");
     const linhas = Array.from(tbody.rows);
@@ -1134,3 +1030,4 @@ function toggleFullScreen() {
 </script>
 </body>
 </html>
+
