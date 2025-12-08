@@ -847,7 +847,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
 
     let boundsTotal = L.latLngBounds();
     let indexCorteInicio = 0;
-    let indexCorteFim = -1; // -1 indica que ainda não achamos o destino específico
+    let indexCorteFim = -1; 
     let rastroCoords = [];
 
     // --- PREPARAÇÃO DOS DADOS ---
@@ -867,16 +867,14 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         // 2. Descobre onde o DESTINO está (Índice Final)
         if (tipo === 'inicial') {
             let menorDistDest = Infinity;
-            // Busca o ponto do traçado mais próximo da coordenada de destino (latD, lngD)
             for (let j = 0; j < rastroCoords.length; j++) {
                 const distDest = Math.sqrt(Math.pow(rastroCoords[j][0] - latD, 2) + Math.pow(rastroCoords[j][1] - lngD, 2));
                 if (distDest < menorDistDest) {
                     menorDistDest = distDest;
-                    indexCorteFim = j + 1; // +1 para incluir o ponto visualmente
+                    indexCorteFim = j + 1; // Pega o ponto da rota mais próximo
                 }
             }
         } else {
-            // Se for previsão normal (final), vai até o fim do traçado
             indexCorteFim = rastroCoords.length;
         }
     }
@@ -884,8 +882,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
     // --- DESENHO DAS CAMADAS ---
     if (rastroCoords.length > 0) {
         
-        // CAMADA 1: ROTA VERMELHA (Fundo)
-        // Mantive oculto para 'inicial' para não poluir, já que agora teremos preto e azul.
+        // CAMADA 1: ROTA VERMELHA (Só desenha se NÃO for inicial)
         if (tipo !== 'inicial') {
             const linhaVermelha = L.polyline(rastroCoords, {
                 color: '#ff0505',
@@ -896,27 +893,39 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
             boundsTotal.extend(linhaVermelha.getBounds());
         }
 
-        // CAMADA 2: ROTA AZUL (DO ÔNIBUS ATÉ O DESTINO)
+        // CAMADA 2: ROTA AZUL (DO ÔNIBUS ATÉ O DESTINO EXATO)
         let partesParaDesenhar = [];
 
         if (indexCorteFim > indexCorteInicio) {
-            // CASO COMUM: O destino está à frente do ônibus
-            // Desenha do indexBus até indexDestino
-            partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio, indexCorteFim));
+            // Rota linear simples
+            let segmento = rastroCoords.slice(indexCorteInicio, indexCorteFim);
+            // Se for inicial, força a conexão final com a coordenada exata
+            if (tipo === 'inicial' && !isNaN(latD) && !isNaN(lngD)) {
+                segmento.push([latD, lngD]);
+            }
+            partesParaDesenhar.push(segmento);
         } 
         else if (indexCorteFim !== -1 && indexCorteFim < indexCorteInicio && tipo === 'inicial') {
-            // CASO LOOP/CIRCULAR: O destino está "atrás" no array (início da rota), e o ônibus está no fim
-            // 1. Desenha do ônibus até o fim da linha
+            // Rota Circular (Ônibus no fim -> Início -> Destino)
+            
+            // Parte 1: Ônibus até o fim da rota
             partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio));
-            // 2. Desenha do início da linha até o destino
-            partesParaDesenhar.push(rastroCoords.slice(0, indexCorteFim));
+            
+            // Parte 2: Início da rota até o ponto mais próximo do destino
+            let segmento2 = rastroCoords.slice(0, indexCorteFim);
+            
+            // Força a conexão final com a coordenada exata
+            if (!isNaN(latD) && !isNaN(lngD)) {
+                segmento2.push([latD, lngD]);
+            }
+            partesParaDesenhar.push(segmento2);
         }
         else if (tipo !== 'inicial') {
-             // Fallback: Se não for inicial, desenha até o fim
+             // Fallback
              partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio));
         }
 
-        // Renderiza os segmentos azuis
+        // Renderiza
         partesParaDesenhar.forEach(parte => {
             if (parte.length > 1) {
                 const linhaAzul = L.polyline(parte, {
@@ -926,14 +935,13 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
                     interactive: false
                 }).addTo(mapaLayerGroup);
                 
-                // Se for inicial, ajusta o zoom pela linha azul
                 if (tipo === 'inicial') {
                     boundsTotal.extend(linhaAzul.getBounds());
                 }
             }
         });
 
-        // CAMADA 3: LINHA PONTILHADA (Conexão do ônibus à rota azul)
+        // CAMADA 3: CONEXÃO DO ÔNIBUS À ROTA
         L.polyline([[latO, lngO], rastroCoords[indexCorteInicio]], {
             color: '#0d6efd',
             weight: 2,
@@ -942,8 +950,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         }).addTo(mapaLayerGroup);
     }
 
-    // CAMADA 4: RASTRO REAL (PRETO) - AGORA SEMPRE VISÍVEL
-    // Removemos a restrição de "tipo !== 'inicial'"
+    // CAMADA 4: RASTRO REAL (PRETO)
     const pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
     if (pontosReais.length > 0) {
         const pathReal = [...pontosReais.map(c => [c[1], c[0]]), [latO, lngO]];
@@ -955,7 +962,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
             interactive: false
         }).addTo(mapaLayerGroup);
         
-        // Se for inicial, também consideramos o rastro real para o zoom
+        // Se for inicial, incluímos o rastro no zoom automático
         if (tipo === 'inicial') {
             boundsTotal.extend(linhaReal.getBounds());
         }
@@ -985,7 +992,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         .bindPopup(`<b>🚌 ${nomeO}</b>`)
         .addTo(mapaLayerGroup);
     
-    // Ajuste final do zoom
+    // Força o zoom a incluir o destino exato
     boundsTotal.extend([latO, lngO]);
     if (!isNaN(latD) && !isNaN(lngD)) boundsTotal.extend([latD, lngD]);
 
