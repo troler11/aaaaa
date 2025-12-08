@@ -83,7 +83,7 @@ function processarDados($rows) {
 
     // Mapeamento das colunas (Adicione variações de nomes aqui se precisar)
     $map = [
-        'empresa' => $findCol(['clientes', 'cliente', 'empresa']), 
+        'empresa' => $findCol(['clientes', 'cliente', 'empresa','CLIENTES']), 
         'rota' => $findCol(['rota', 'linha', 'itinerario']),
         'motorista' => $findCol(['motorista', 'condutor', 'mot']), 
         'reserva' => $findCol(['reserva']),
