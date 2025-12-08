@@ -847,7 +847,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
 
     let boundsTotal = L.latLngBounds();
     let indexCorteInicio = 0;
-    let indexCorteFim = -1;
+    let indexCorteFim = -1; // -1 indica que ainda não achamos o destino específico
     let rastroCoords = [];
 
     // --- PREPARAÇÃO DOS DADOS ---
@@ -865,18 +865,18 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         }
 
         // 2. Descobre onde o DESTINO está (Índice Final)
-        // Se for 'final', o destino é o último ponto. Se for 'inicial', procuramos pela coordenada latD/lngD
         if (tipo === 'inicial') {
             let menorDistDest = Infinity;
+            // Busca o ponto do traçado mais próximo da coordenada de destino (latD, lngD)
             for (let j = 0; j < rastroCoords.length; j++) {
                 const distDest = Math.sqrt(Math.pow(rastroCoords[j][0] - latD, 2) + Math.pow(rastroCoords[j][1] - lngD, 2));
                 if (distDest < menorDistDest) {
                     menorDistDest = distDest;
-                    indexCorteFim = j + 1; // +1 para incluir o ponto
+                    indexCorteFim = j + 1; // +1 para incluir o ponto visualmente
                 }
             }
         } else {
-            // Se for previsão normal, desenha até o fim da linha
+            // Se for previsão normal (final), vai até o fim do traçado
             indexCorteFim = rastroCoords.length;
         }
     }
@@ -884,7 +884,8 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
     // --- DESENHO DAS CAMADAS ---
     if (rastroCoords.length > 0) {
         
-        // CAMADA 1: ROTA VERMELHA (Só desenha se NÃO for inicial)
+        // CAMADA 1: ROTA VERMELHA (Fundo)
+        // Mantive oculto para 'inicial' para não poluir, já que agora teremos preto e azul.
         if (tipo !== 'inicial') {
             const linhaVermelha = L.polyline(rastroCoords, {
                 color: '#ff0505',
@@ -899,22 +900,23 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         let partesParaDesenhar = [];
 
         if (indexCorteFim > indexCorteInicio) {
-            // SITUAÇÃO NORMAL: Ônibus (10) -> Destino (50)
+            // CASO COMUM: O destino está à frente do ônibus
+            // Desenha do indexBus até indexDestino
             partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio, indexCorteFim));
         } 
         else if (indexCorteFim !== -1 && indexCorteFim < indexCorteInicio && tipo === 'inicial') {
-            // SITUAÇÃO LOOP/CIRCULAR: Ônibus (90) -> Fim (100) ... Início (0) -> Destino (10)
-            // Desenha do ônibus até o fim
+            // CASO LOOP/CIRCULAR: O destino está "atrás" no array (início da rota), e o ônibus está no fim
+            // 1. Desenha do ônibus até o fim da linha
             partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio));
-            // Desenha do início até o destino
+            // 2. Desenha do início da linha até o destino
             partesParaDesenhar.push(rastroCoords.slice(0, indexCorteFim));
         }
         else if (tipo !== 'inicial') {
-             // Fallback para rota normal (até o fim)
+             // Fallback: Se não for inicial, desenha até o fim
              partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio));
         }
 
-        // Renderiza os pedaços da linha azul
+        // Renderiza os segmentos azuis
         partesParaDesenhar.forEach(parte => {
             if (parte.length > 1) {
                 const linhaAzul = L.polyline(parte, {
@@ -924,14 +926,14 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
                     interactive: false
                 }).addTo(mapaLayerGroup);
                 
-                // Se for inicial, ajusta o zoom baseado na linha azul desenhada
+                // Se for inicial, ajusta o zoom pela linha azul
                 if (tipo === 'inicial') {
                     boundsTotal.extend(linhaAzul.getBounds());
                 }
             }
         });
 
-        // CAMADA 3: LINHA PONTILHADA (Conexão do ônibus à rota)
+        // CAMADA 3: LINHA PONTILHADA (Conexão do ônibus à rota azul)
         L.polyline([[latO, lngO], rastroCoords[indexCorteInicio]], {
             color: '#0d6efd',
             weight: 2,
@@ -940,9 +942,10 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         }).addTo(mapaLayerGroup);
     }
 
-    // CAMADA 4: RASTRO REAL (PRETO) - Só se NÃO for inicial
+    // CAMADA 4: RASTRO REAL (PRETO) - AGORA SEMPRE VISÍVEL
+    // Removemos a restrição de "tipo !== 'inicial'"
     const pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
-    if (tipo !== 'inicial' && pontosReais.length > 0) {
+    if (pontosReais.length > 0) {
         const pathReal = [...pontosReais.map(c => [c[1], c[0]]), [latO, lngO]];
         const linhaReal = L.polyline(pathReal, {
             color: '#000', 
@@ -951,7 +954,11 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
             dashArray: '3, 6',
             interactive: false
         }).addTo(mapaLayerGroup);
-        boundsTotal.extend(linhaReal.getBounds());
+        
+        // Se for inicial, também consideramos o rastro real para o zoom
+        if (tipo === 'inicial') {
+            boundsTotal.extend(linhaReal.getBounds());
+        }
     }
 
     // CAMADA 5: MARCADORES
