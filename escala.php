@@ -109,9 +109,28 @@ function processarDados($rows) {
         $empresa = isset($r[$map['empresa']]) ? trim($r[$map['empresa']]) : '---';
         
         // Bloqueio de Empresas Específicas
-        $empresaCheck = mb_strtoupper($empresa, 'UTF-8');
-        $empresasIgnoradas = ['VIACAO MIMO VARZEA', 'VIAÇÃO MIMO VARZEA', 'VIACAO MIMO', 'VIAÇÃO MIMO'];
-        if (in_array($empresaCheck, $empresasIgnoradas)) continue;
+       $empresaLimpa = iconv('UTF-8', 'ASCII//TRANSLIT', $empresa);
+        $empresaLimpa = strtoupper($empresaLimpa); // Converte para MAIÚSCULO
+        
+        // 2. Lista de termos que, se encontrados, removem a linha
+        // Use apenas letras maiúsculas e SEM acentos aqui
+        $termosBloqueados = [
+            'VIACAO MIMO VARZEA', 
+            'VIACAO MIMO',
+            'GARAGEM' // Opcional: bloqueia linhas de garagem se houver
+        ];
+
+        $bloquear = false;
+        foreach ($termosBloqueados as $termo) {
+            // Verifica se o termo está CONTIDO no nome da empresa (strpos)
+            if (strpos($empresaLimpa, $termo) !== false) {
+                $bloquear = true;
+                break;
+            }
+        }
+        
+        // Se encontrou algum termo proibido, pula esta linha
+        if ($bloquear) continue;
 
         $valManut = $r[$map['manut']] ?? '';
         $valCarro = $r[$map['carro']] ?? '';
