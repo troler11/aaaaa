@@ -831,6 +831,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
 
     // 1. LIMPEZA
     mapaLayerGroup.clearLayers();
+    // Se existir uma rota calculada anteriormente, removemos
     if (routingControl) {
         mapaInstancia.removeControl(routingControl);
         routingControl = null;
@@ -853,7 +854,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
     if (rastroOficial?.length) {
         rastroCoords = rastroOficial.map(c => [parseFloat(c[1]), parseFloat(c[0])]); // [lat, lng]
         
-        // Descobre onde o ÔNIBUS está na rota
+        // Descobre onde o ônibus está na linha oficial (apenas para referência de zoom ou lógica padrão)
         let menorDistBus = Infinity;
         for (let i = 0; i < rastroCoords.length; i++) {
             const dist = Math.sqrt(Math.pow(rastroCoords[i][0] - latO, 2) + Math.pow(rastroCoords[i][1] - lngO, 2));
@@ -864,54 +865,62 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         }
     }
 
-    // --- DESENHO DAS CAMADAS ---
-    if (rastroCoords.length > 0) {
+    // --- LÓGICA DE DESENHO ---
+
+    // CENÁRIO 1: PREVISÃO INICIAL (Cálculo de Rota pelas Ruas via Routing Machine)
+    if (tipo === 'inicial' && rastroCoords.length > 0) {
         
-        // CAMADA 1: ROTA VERMELHA (Só desenha se NÃO for inicial)
-        if (tipo !== 'inicial') {
-            const linhaVermelha = L.polyline(rastroCoords, {
-                color: '#ff0505',
-                weight: 6,
-                opacity: 0.4,
-                interactive: false
-            }).addTo(mapaLayerGroup);
-            boundsTotal.extend(linhaVermelha.getBounds());
-        }
+        // O destino é o Ponto 0 do traçado oficial
+        const destinoLat = rastroCoords[0][0];
+        const destinoLng = rastroCoords[0][1];
 
-        // CAMADA 2: ROTA AZUL
-        let segmentoAzul = [];
+        // Cria a rota dinâmica (Veículo -> Ponto 0)
+        routingControl = L.Routing.control({
+            waypoints: [
+                L.latLng(latO, lngO),       // Origem: Veículo
+                L.latLng(destinoLat, destinoLng) // Destino: Ponto Inicial
+            ],
+            lineOptions: {
+                styles: [{color: '#0d6efd', opacity: 0.9, weight: 4}] // Azul
+            },
+            createMarker: function() { return null; }, // Não cria marcadores extras (já temos os nossos)
+            addWaypoints: false,
+            draggableWaypoints: false,
+            fitSelectedRoutes: false, // Controlamos o zoom manualmente
+            show: false, // Esconde o painel de texto com direções
+            router: L.Routing.osrmv1({
+                serviceUrl: 'https://router.project-osrm.org/route/v1' // Usa o serviço público OSRM
+            })
+        }).addTo(mapaInstancia);
 
-        if (tipo === 'inicial') {
-            // REGRA ATUALIZADA: Considerar SOMENTE Veículo > Ponto 0.
-            // Ignora o resto da rota oficial (o ponto final).
-            // Cria uma conexão direta entre a posição do ônibus na rota e o ponto 0.
-            if (rastroCoords.length > 0) {
-                segmentoAzul = [
-                    rastroCoords[indexCorteInicio], // Onde o ônibus está
-                    rastroCoords[0]                 // Ponto 0 (Inicial)
-                ];
-            }
-        } else {
-            // Previsão normal (Final): Veículo -> Fim da Linha (Seguindo o traçado)
-            segmentoAzul = rastroCoords.slice(indexCorteInicio);
-        }
+        // Adiciona o destino ao bounds para o zoom funcionar
+        boundsTotal.extend([destinoLat, destinoLng]);
 
-        // Renderiza a Linha Azul
+    } 
+    // CENÁRIO 2: PREVISÃO NORMAL (Usa o traçado oficial recortado)
+    else if (rastroCoords.length > 0) {
+        
+        // Rota Vermelha (Fundo)
+        const linhaVermelha = L.polyline(rastroCoords, {
+            color: '#ff0505',
+            weight: 6,
+            opacity: 0.4,
+            interactive: false
+        }).addTo(mapaLayerGroup);
+        boundsTotal.extend(linhaVermelha.getBounds());
+
+        // Rota Azul (Recorte do traçado oficial)
+        const segmentoAzul = rastroCoords.slice(indexCorteInicio);
         if (segmentoAzul.length > 1) {
-            const linhaAzul = L.polyline(segmentoAzul, {
+            L.polyline(segmentoAzul, {
                 color: '#0d6efd',
                 weight: 4,
                 opacity: 0.9,
                 interactive: false
             }).addTo(mapaLayerGroup);
-            
-            // Se for inicial, foca o zoom apenas nessa linha (Veiculo -> Ponto 0)
-            if (tipo === 'inicial') {
-                boundsTotal.extend(linhaAzul.getBounds());
-            }
         }
 
-        // CAMADA 3: CONEXÃO PONTILHADA (Do ônibus real até o traçado azul)
+        // Conexão pontilhada simples
         L.polyline([[latO, lngO], rastroCoords[indexCorteInicio]], {
             color: '#0d6efd',
             weight: 2,
@@ -920,7 +929,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         }).addTo(mapaLayerGroup);
     }
 
-    // CAMADA 4: RASTRO REAL (PRETO) - SEMPRE VISÍVEL
+    // --- CAMADA RASTRO REAL (PRETO) ---
     const pontosReais = Array.isArray(rastroReal) ? rastroReal : (rastroReal?.coords || []);
     if (pontosReais.length > 0) {
         const pathReal = [...pontosReais.map(c => [c[1], c[0]]), [latO, lngO]];
@@ -931,12 +940,10 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
             dashArray: '3, 6',
             interactive: false
         }).addTo(mapaLayerGroup);
-        
-        // Inclui o rastro no cálculo do zoom
         boundsTotal.extend(linhaReal.getBounds());
     }
 
-    // CAMADA 5: MARCADORES
+    // --- MARCADORES ---
     if (todosPontos?.length) {
         todosPontos.forEach((p, i) => {
             const isFirst = i === 0;
@@ -955,12 +962,12 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         });
     }
 
-    // CAMADA 6: ÔNIBUS
+    // --- MARCADOR DO ÔNIBUS ---
     L.marker([latO, lngO], { icon: icons.bus, zIndexOffset: 1000 })
         .bindPopup(`<b>🚌 ${nomeO}</b>`)
         .addTo(mapaLayerGroup);
     
-    // Ajuste final do zoom
+    // Ajuste Final de Zoom
     boundsTotal.extend([latO, lngO]);
 
     if (mapaInstancia && boundsTotal.isValid()) {
