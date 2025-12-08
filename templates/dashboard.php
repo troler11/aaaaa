@@ -847,15 +847,14 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
 
     let boundsTotal = L.latLngBounds();
     let indexCorteInicio = 0;
-    let indexCorteFim = 0;
+    let indexCorteFim = -1;
     let rastroCoords = [];
 
     // --- PREPARAÇÃO DOS DADOS ---
     if (rastroOficial?.length) {
         rastroCoords = rastroOficial.map(c => [parseFloat(c[1]), parseFloat(c[0])]); // [lat, lng]
-        indexCorteFim = rastroCoords.length;
-
-        // 1. Descobre onde o ÔNIBUS está
+        
+        // 1. Descobre onde o ÔNIBUS está (Índice Inicial)
         let menorDistBus = Infinity;
         for (let i = 0; i < rastroCoords.length; i++) {
             const dist = Math.sqrt(Math.pow(rastroCoords[i][0] - latO, 2) + Math.pow(rastroCoords[i][1] - lngO, 2));
@@ -865,29 +864,27 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
             }
         }
 
-        // 2. Se for Previsão INICIAL, descobre onde é o PONTO DE CHEGADA
+        // 2. Descobre onde o DESTINO está (Índice Final)
+        // Se for 'final', o destino é o último ponto. Se for 'inicial', procuramos pela coordenada latD/lngD
         if (tipo === 'inicial') {
             let menorDistDest = Infinity;
-            
-            // CORREÇÃO 1: Procura no array inteiro (j=0), pois o ponto inicial pode ser o índice 0
             for (let j = 0; j < rastroCoords.length; j++) {
                 const distDest = Math.sqrt(Math.pow(rastroCoords[j][0] - latD, 2) + Math.pow(rastroCoords[j][1] - lngD, 2));
                 if (distDest < menorDistDest) {
                     menorDistDest = distDest;
-                    indexCorteFim = j + 1;
+                    indexCorteFim = j + 1; // +1 para incluir o ponto
                 }
             }
-            
-            // CORREÇÃO 2: Se o ponto final estiver "atrás" do ônibus no array (índice menor),
-            // NÃO forçamos ir até o final da linha. Simplesmente cortamos o desenho ali.
-            // Se indexCorteFim < indexCorteInicio, o slice retornará vazio, o que é melhor que desenhar errado.
+        } else {
+            // Se for previsão normal, desenha até o fim da linha
+            indexCorteFim = rastroCoords.length;
         }
     }
 
     // --- DESENHO DAS CAMADAS ---
     if (rastroCoords.length > 0) {
         
-        // CAMADA 1: ROTA VERMELHA (Só se NÃO for inicial)
+        // CAMADA 1: ROTA VERMELHA (Só desenha se NÃO for inicial)
         if (tipo !== 'inicial') {
             const linhaVermelha = L.polyline(rastroCoords, {
                 color: '#ff0505',
@@ -899,25 +896,42 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         }
 
         // CAMADA 2: ROTA AZUL (DO ÔNIBUS ATÉ O DESTINO)
-        // O método slice lida com indices invertidos retornando array vazio (não desenha nada errado)
-        const parteFutura = rastroCoords.slice(indexCorteInicio, indexCorteFim);
-        
-        if (parteFutura.length > 1) {
-            const linhaAzul = L.polyline(parteFutura, {
-                color: '#0d6efd',
-                weight: 4,
-                opacity: 0.9,
-                interactive: false
-            }).addTo(mapaLayerGroup);
-            
-            // Se for inicial, damos foco na linha azul
-            if (tipo === 'inicial') {
-                boundsTotal.extend(linhaAzul.getBounds());
-            }
+        let partesParaDesenhar = [];
+
+        if (indexCorteFim > indexCorteInicio) {
+            // SITUAÇÃO NORMAL: Ônibus (10) -> Destino (50)
+            partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio, indexCorteFim));
+        } 
+        else if (indexCorteFim !== -1 && indexCorteFim < indexCorteInicio && tipo === 'inicial') {
+            // SITUAÇÃO LOOP/CIRCULAR: Ônibus (90) -> Fim (100) ... Início (0) -> Destino (10)
+            // Desenha do ônibus até o fim
+            partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio));
+            // Desenha do início até o destino
+            partesParaDesenhar.push(rastroCoords.slice(0, indexCorteFim));
+        }
+        else if (tipo !== 'inicial') {
+             // Fallback para rota normal (até o fim)
+             partesParaDesenhar.push(rastroCoords.slice(indexCorteInicio));
         }
 
-        // CAMADA 3: LINHA PONTILHADA DE CONEXÃO
-        // Liga o ônibus até o traçado oficial mais próximo
+        // Renderiza os pedaços da linha azul
+        partesParaDesenhar.forEach(parte => {
+            if (parte.length > 1) {
+                const linhaAzul = L.polyline(parte, {
+                    color: '#0d6efd',
+                    weight: 4,
+                    opacity: 0.9,
+                    interactive: false
+                }).addTo(mapaLayerGroup);
+                
+                // Se for inicial, ajusta o zoom baseado na linha azul desenhada
+                if (tipo === 'inicial') {
+                    boundsTotal.extend(linhaAzul.getBounds());
+                }
+            }
+        });
+
+        // CAMADA 3: LINHA PONTILHADA (Conexão do ônibus à rota)
         L.polyline([[latO, lngO], rastroCoords[indexCorteInicio]], {
             color: '#0d6efd',
             weight: 2,
@@ -959,7 +973,7 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         });
     }
 
-    // CAMADA 6: ÍCONE DO ÔNIBUS
+    // CAMADA 6: ÔNIBUS
     L.marker([latO, lngO], { icon: icons.bus, zIndexOffset: 1000 })
         .bindPopup(`<b>🚌 ${nomeO}</b>`)
         .addTo(mapaLayerGroup);
@@ -972,7 +986,6 @@ function gerarMapaRota(latO, lngO, latD, lngD, nomeO, nomeD, waypoints, todosPon
         mapaInstancia.fitBounds(boundsTotal, { padding: [50, 50], maxZoom: 16, animate: false });
     }
 }
-
 function ordenarTabela(n) {
     const tbody = document.getElementById("tabela-veiculos");
     const linhas = Array.from(tbody.rows);
